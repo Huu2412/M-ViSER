@@ -74,7 +74,7 @@ def evaluate(model, val_loader, loss_fn, device, config):
 
     start_eval_time = time.time()
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Eval", leave=False):
+        for batch in tqdm(val_loader, desc="Eval", disable=True):
             input_values  = batch["input_values"].to(device)
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:
@@ -235,7 +235,7 @@ def train(config):
         train_regional_correct = 0
         train_total = 0
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
             input_values   = batch["input_values"].to(device)
             attention_mask = batch.get("attention_mask")
@@ -348,7 +348,15 @@ def train(config):
                 "val_metrics": val_metrics,
                 "config": vars(config),
             }, save_path)
-            logger.info(f"  ✓ Saved checkpoint ({config.checkpoint_metric}={current_metric:.4f}) -> {save_path}")
+            
+            is_best = (current_metric, save_path) == top_k_checkpoints[0]
+            if is_best:
+                best_path = os.path.join(config.output_dir, "best_model.pt")
+                import shutil
+                shutil.copyfile(save_path, best_path)
+                logger.info(f"  🌟 New best model! Saved to {best_path}")
+            else:
+                logger.info(f"  ✓ Saved checkpoint ({config.checkpoint_metric}={current_metric:.4f}) -> {save_path}")
             
             if len(top_k_checkpoints) > max_checkpoints:
                 worst_acc, worst_path = top_k_checkpoints.pop()
