@@ -1,0 +1,124 @@
+# ViSER Optimized Configuration File
+# ============================================================
+# Tích hợp cơ chế Discriminative LRs, Cosine Scheduler
+# và Waveform Augmentations.
+# ============================================================
+
+experiment_name: "viser_optimized"
+
+# ── Paths ────────────────────────────────────────────────────
+paths:
+  train_csv:   "data/fold_1/train.csv"
+  val_csv:     "data/fold_1/val.csv"
+  test_csv:    "data/test.csv"
+  output_dir:  "checkpoints"
+  cache_dir:   "cache_vi_ser"
+  log_dir:     "logs_vi_ser"
+
+# ── Dataset & Augmentation ───────────────────────────────────
+dataset:
+  hf_dataset:    "hustep-lab/ViSEC"
+  current_fold:  1
+  
+  speech_col:    "file"
+  text_col:      "text"
+  emotion_col:   "emotion"
+  regional_col:  "regional"
+  emotion_label_map:
+    # Tên đầy đủ (format trong ViSEC Hugging Face)
+    neutral: 0
+    happy:   1
+    angry:   2
+    sad:     3
+    # Alias dạng mã (e0/e1/e2/e3 - format cũ)
+    e0: 0
+    e1: 1
+    e2: 2
+    e3: 3
+  regional_label_map:
+    # Tên đầy đủ (format trong ViSEC Hugging Face)
+    north:   0   # Bắc
+    mid:     1   # Trung (ViSEC dùng 'mid')
+    south:   2   # Nam
+    # Alias tương thích (format cũ)
+    central: 1   # Alias khác của miền Trung
+  augmentations:
+    waveform_augment:
+      prob: 0.0
+      pitch_shift:
+        weight: 0.4
+        n_steps_range: [-1.0, 1.0]
+      noise_injection:
+        weight: 0.4
+        noise_factor_range: [0.001, 0.015]
+      time_shift:
+        weight: 0.2
+        range: [0.9, 1.1]
+
+# ── Model & Architecture ─────────────────────────────────────
+model:
+  acoustic:               "nguyenvulebinh/wav2vec2-base-vietnamese-250h"
+  phowhisper:             "vinai/PhoWhisper-medium"
+  phobert:                "vinai/phobert-base"
+  fusion_dim:             512
+  repair_hidden_dim:      256
+  classifier_hidden_dim:  256
+  num_emotion_classes:    4
+  num_regional_classes:   3
+  num_heads:              8
+  dropout:                0.3       # Tăng từ 0.1 lên 0.3 để chống overfitting
+  delta_scale:            0.3
+  uncertainty_alpha_min:  0.05
+  uncertainty_alpha_max:  0.95
+
+# ── Freeze Settings ──────────────────────────────────────────
+freeze:
+  feature_extractor:  true    # CNN layers của ViP-VL (luôn freeze)
+  acoustic_encoder:   false   # Transformer layers của ViP-VL (finetune)
+  phobert:            true    # ĐÓNG BĂNG PhoBERT: tránh bị nhiễu do text xấu
+  teacher:            true    # PhoWhisper luôn frozen
+
+# ── Loss Weights ─────────────────────────────────────────────
+loss:
+  alpha_student_emotion: 0.5  # Trọng số loss cảm xúc của nhánh Student
+  alpha_teacher_emotion: 0.5  # Trọng số loss cảm xúc của nhánh Teacher
+  alpha_ctc:       0.2
+  alpha_kd:        0.5
+  alpha_distill:   0.0    # Đã tắt theo yêu cầu
+  alpha_regional:  0.5
+  kd_temperature:  2.0
+
+# ── Training ─────────────────────────────────────────────────
+training:
+  epochs:                     50
+  batch_size:                 8
+  num_workers:                0      # Đặt về 0 để tránh lỗi 'Broken pipe' trên Windows
+  gradient_accumulation_steps: 4
+  
+  # --- LRs ---
+  lr:                         0.0002
+  backbone_lr:                0.00003  # Giảm LR backbone từ 1e-4 xuống 3e-5 (rất quan trọng)
+  head_lr:                    0.0005
+  
+  # --- Misc ---
+  warmup_epochs:              3
+  weight_decay:               0.01
+  max_audio_length_sec:       10.0
+  sampling_rate:              16000
+  ctc_zero_infinity:          true
+  seed:                       42
+  grad_clip_norm:             1.0
+  label_smoothing:            0.05    # Tránh overconfident
+  
+  # --- Checkpoint & Scheduler ---
+  checkpoint_metric:          "macro_f1"
+  scheduler:
+    type: "cosine"
+    min_lr: 1.0e-6
+    warmup_epochs: 3
+
+# ── Logging ──────────────────────────────────────────────────
+logging:
+  use_wandb:      false
+  wandb_project:  "viser"
+  log_steps:      50
