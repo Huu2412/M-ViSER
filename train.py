@@ -91,8 +91,9 @@ def evaluate(model, val_loader, loss_fn, device, config):
                 input_values=input_values,
                 attention_mask=attention_mask,
                 student_texts=student_texts,
-                teacher_texts=teacher_texts,
-                training_mode=True,
+                teacher_texts=None,
+                processor=ctc_tokenizer,
+                training_mode=False,
             )
 
             loss, loss_dict = loss_fn(
@@ -254,6 +255,7 @@ def train(config):
                 attention_mask=attention_mask,
                 student_texts=student_texts,
                 teacher_texts=teacher_texts,
+                processor=ctc_tokenizer,
                 training_mode=True,
             )
 

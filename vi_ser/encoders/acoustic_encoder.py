@@ -66,14 +66,18 @@ class VipVlAcousticEncoder(nn.Module):
             for param in self.encoder.encoder.feature_extractor.parameters():
                 param.requires_grad = False
 
-    def get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor):
+    def get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor, max_input_len: int = None, max_output_len: int = None):
         """
         Compute CTC output lengths from input audio lengths.
-        Falls back to Wav2Vec2-style stride computation.
+        To ensure 100% accuracy regardless of backbone (Wav2Vec2 vs ChunkFormer),
+        we use the dynamic ratio: (actual_audio_len / max_audio_len) * max_feat_len
         """
+        if max_input_len is not None and max_output_len is not None:
+            return torch.round(input_lengths.float() * (max_output_len / max_input_len)).long()
+            
+        # Fallback if dimensions are not provided
         if hasattr(self.encoder, "_get_feat_extract_output_lengths"):
             return self.encoder._get_feat_extract_output_lengths(input_lengths)
-        # Approximate for ViP-VL (ChunkFormer stride ~ 320 at 16kHz)
         return (input_lengths - 1) // 320 + 1
 
     def forward(
@@ -103,12 +107,18 @@ class VipVlAcousticEncoder(nn.Module):
 
         # Mean pool over time → utterance embedding → project to fusion_dim
         if attention_mask is not None:
-            # Mask padding before pooling
-            feat_len = self.get_feat_extract_output_lengths(attention_mask.sum(-1))
+            # Mask padding before pooling (use dynamic ratio for 100% accuracy)
+            max_input_len = attention_mask.shape[1]
+            max_output_len = hidden_states.shape[1]
+            feat_len = self.get_feat_extract_output_lengths(
+                attention_mask.sum(-1), max_input_len, max_output_len
+            )
             mask = torch.zeros(
                 hidden_states.shape[:2], dtype=torch.bool, device=hidden_states.device
             )
             for i, length in enumerate(feat_len):
+                # Ensure length does not exceed max_output_len
+                length = min(length.item(), max_output_len)
                 mask[i, :length] = True
             # Masked mean
             hidden_masked = hidden_states * mask.unsqueeze(-1)

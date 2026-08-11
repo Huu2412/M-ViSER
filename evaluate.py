@@ -94,6 +94,7 @@ def evaluate_checkpoint(
                 attention_mask=attention_mask,
                 student_texts=student_texts,
                 teacher_texts=None,
+                processor=ctc_tokenizer,
                 training_mode=False,  # No teacher at test time
             )
 

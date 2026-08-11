@@ -215,10 +215,11 @@ class ViSERDataset(Dataset):
             if clean_text and self.ctc_tokenizer is not None:
                 ctc_ids = self.ctc_tokenizer(clean_text).input_ids
                 item["ctc_labels"] = torch.tensor(ctc_ids, dtype=torch.long)
-                item["student_text"] = clean_text  # ground truth as student text
             else:
                 item["ctc_labels"] = None
-                item["student_text"] = ""
+            
+            # Luôn set student_text = None để model.py tự động decode_ctc (Bắt buộc cho Repair Gate)
+            item["student_text"] = None
 
             # ── Teacher text (PhoWhisper transcription) ────────────────────
             if self.is_training:

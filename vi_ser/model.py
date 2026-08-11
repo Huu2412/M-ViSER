@@ -83,9 +83,9 @@ class ViSERModel(nn.Module):
         # ── Text Encoder (PhoBERT) ───────────────────────────────────────────
         self.text_encoder = PhoBERTTextEncoder(config)
 
-        # ── Student Path: AURORA Fusion Modules ──────────────────────────────
+        # ── Student & Teacher Shared Fusion Modules ──────────────────────────────
         # CrossModal: both inputs already at fusion_dim (projected by respective encoders)
-        self.student_cross_modal = CrossModalEncoders(
+        self.shared_cross_modal = CrossModalEncoders(
             audio_input_dim=config.fusion_dim,
             text_input_dim=config.fusion_dim,
             fusion_dim=config.fusion_dim,
@@ -107,19 +107,7 @@ class ViSERModel(nn.Module):
             alpha_min=config.uncertainty_alpha_min,
             alpha_max=config.uncertainty_alpha_max,
         )
-        self.student_gmu = AudioGuidedGatedFusion(
-            fusion_dim=config.fusion_dim,
-            dropout=config.dropout,
-        )
-
-        # ── Teacher Path: AURORA Fusion (clean text, no repair needed) ───────
-        self.teacher_cross_modal = CrossModalEncoders(
-            audio_input_dim=config.fusion_dim,
-            text_input_dim=config.fusion_dim,
-            fusion_dim=config.fusion_dim,
-            dropout=config.dropout,
-        )
-        self.teacher_gmu = AudioGuidedGatedFusion(
+        self.shared_gmu = AudioGuidedGatedFusion(
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
         )
@@ -127,7 +115,6 @@ class ViSERModel(nn.Module):
         # ── Classifier Heads ─────────────────────────────────────────────────
         self.emotion_classifier  = EmotionClassifier(config)
         self.regional_classifier = RegionalClassifier(config)
-        self.teacher_head        = TeacherEmotionHead(config)
 
     def _student_forward(
         self,
@@ -146,7 +133,7 @@ class ViSERModel(nn.Module):
         z_asr_student = self.text_encoder(student_texts, device=z_audio.device)
 
         # Cross-modal alignment (both already at fusion_dim, this refines)
-        z_audio_enc, z_text_enc = self.student_cross_modal(z_audio, z_asr_student)
+        z_audio_enc, z_text_enc = self.shared_cross_modal(z_audio, z_asr_student)
 
         # Repair noisy CTC text embedding using audio guidance
         z_repaired = self.repair_mlp(z_audio_enc, z_text_enc)
@@ -155,7 +142,7 @@ class ViSERModel(nn.Module):
         alpha = self.uncertainty_gate(z_audio_enc, z_text_enc)
 
         # Audio-guided gated fusion
-        z_fused = self.student_gmu(z_audio_enc, z_repaired, alpha)
+        z_fused = self.shared_gmu(z_audio_enc, z_repaired, alpha)
 
         return z_fused, z_repaired, alpha
 
@@ -174,13 +161,13 @@ class ViSERModel(nn.Module):
             logits_teacher:   [B, num_emotion_classes]
         """
         z_clean_text = self.text_encoder(teacher_texts, device=z_audio.device)
-        z_audio_enc, z_text_enc = self.teacher_cross_modal(z_audio, z_clean_text)
+        z_audio_enc, z_text_enc = self.shared_cross_modal(z_audio, z_clean_text)
 
         # Teacher uses full alpha=1.0 (clean text, maximum confidence)
         alpha_ones = torch.ones(z_audio.size(0), 1, device=z_audio.device)
-        z_teacher_rep = self.teacher_gmu(z_audio_enc, z_text_enc, alpha_ones)
+        z_teacher_rep = self.shared_gmu(z_audio_enc, z_text_enc, alpha_ones)
 
-        logits_teacher = self.teacher_head(z_teacher_rep)
+        logits_teacher = self.emotion_classifier(z_teacher_rep)
         return z_teacher_rep, logits_teacher
 
     def decode_ctc(self, logits_ctc: torch.Tensor, processor) -> List[str]:

@@ -77,8 +77,10 @@ class ViSERLoss(nn.Module):
                 device=input_values.device,
             )
         )
+        max_input_len = input_values.shape[1]
+        max_output_len = logits_ctc.shape[1]
         input_lengths = acoustic_encoder.get_feat_extract_output_lengths(
-            attention_mask.sum(-1)
+            attention_mask.sum(-1), max_input_len, max_output_len
         )
 
         labels_mask = ctc_labels >= 0
