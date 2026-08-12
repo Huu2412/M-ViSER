@@ -386,6 +386,8 @@ def _apply_overrides(config, overrides: list):
         "training.seed":                        ("seed",                        int),
         "training.weight_decay":                ("weight_decay",                float),
         # loss.*
+        "loss.alpha_student_emotion": ("alpha_student_emotion", float),
+        "loss.alpha_teacher_emotion": ("alpha_teacher_emotion", float),
         "loss.alpha_ctc":       ("alpha_ctc",       float),
         "loss.alpha_kd":        ("alpha_kd",         float),
         "loss.alpha_distill":   ("alpha_distill",   float),

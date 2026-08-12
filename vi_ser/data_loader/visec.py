@@ -211,22 +211,24 @@ class ViSERDataset(Dataset):
                 self.config.regional_label_map[regional_str], dtype=torch.long
             )
 
-            # ── CTC labels (clean text → tokenize) ─────────────────────────
-            if clean_text and self.ctc_tokenizer is not None:
-                ctc_ids = self.ctc_tokenizer(clean_text).input_ids
+            # ── Teacher text (PhoWhisper transcription) ────────────────────
+            if self.is_training:
+                teacher_text = self._get_teacher_text(filepath, speech)
+                item["teacher_text"] = teacher_text if teacher_text else clean_text
+            else:
+                item["teacher_text"] = clean_text
+
+            # ── CTC labels (clean text → fallback to teacher_text) ─────────
+            target_text_for_ctc = clean_text if clean_text else item["teacher_text"]
+            
+            if target_text_for_ctc and self.ctc_tokenizer is not None:
+                ctc_ids = self.ctc_tokenizer(target_text_for_ctc).input_ids
                 item["ctc_labels"] = torch.tensor(ctc_ids, dtype=torch.long)
             else:
                 item["ctc_labels"] = None
             
             # Luôn set student_text = None để model.py tự động decode_ctc (Bắt buộc cho Repair Gate)
             item["student_text"] = None
-
-            # ── Teacher text (PhoWhisper transcription) ────────────────────
-            if self.is_training:
-                teacher_text = self._get_teacher_text(filepath, speech)
-                item["teacher_text"] = teacher_text if teacher_text else clean_text
-            else:
-                item["teacher_text"] = ""
 
         return item
 

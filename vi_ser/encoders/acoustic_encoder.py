@@ -15,9 +15,9 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoFeatureExtractor
 
 
-class VipVlAcousticEncoder(nn.Module):
+class Wav2Vec2AcousticEncoder(nn.Module):
     """
-    Wraps ViP-VL (khanhld/vip-vl-base-vie) as the acoustic backbone.
+    Wraps the configured acoustic model (e.g. nguyenvulebinh/wav2vec2-base-vietnamese-250h) as the acoustic backbone.
     Also contains a CTC head that mirrors the student ASR task in MTL-SER.
     """
 

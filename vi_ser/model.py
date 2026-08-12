@@ -51,7 +51,7 @@ import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
 
 from .config import ViSERConfig
-from .encoders.acoustic_encoder import VipVlAcousticEncoder
+from .encoders.acoustic_encoder import Wav2Vec2AcousticEncoder
 from .encoders.text_encoder import PhoBERTTextEncoder
 from .fusion.cross_modal import CrossModalEncoders
 from .fusion.repair_gate import RepairMLP, UncertaintyGate
@@ -64,7 +64,7 @@ class ViSERModel(nn.Module):
     ViSER: Vietnamese Speech Emotion Recognition.
 
     Combines:
-      - ViP-VL acoustic backbone with CTC head (student ASR, from MTL-SER)
+      - Wav2Vec2 acoustic backbone with CTC head (student ASR, from MTL-SER)
       - PhoBERT text encoder (for CTC text and teacher text)
       - AURORA-style Audio-Guided Repair + Gated Fusion
       - Primary: Emotion classification
@@ -78,7 +78,7 @@ class ViSERModel(nn.Module):
         self.config = config
 
         # ── Acoustic Encoder (ViP-VL + CTC head) ────────────────────────────
-        self.acoustic_encoder = VipVlAcousticEncoder(config)
+        self.acoustic_encoder = Wav2Vec2AcousticEncoder(config)
 
         # ── Text Encoder (PhoBERT) ───────────────────────────────────────────
         self.text_encoder = PhoBERTTextEncoder(config)
@@ -222,7 +222,7 @@ class ViSERModel(nn.Module):
         logits_ctc    = acoustic_out["logits_ctc"]     # [B, T, V]
 
         # ── Step 2: Decode CTC text (student) ───────────────────────────────
-        if student_texts is None:
+        if student_texts is None or (len(student_texts) > 0 and student_texts[0] is None):
             # Online CTC decode (slower; prefer pre-decoded for training)
             if processor is not None:
                 student_texts = self.decode_ctc(logits_ctc, processor)
