@@ -61,7 +61,7 @@ def compute_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
     return correct / len(labels)
 
 
-def evaluate(model, val_loader, loss_fn, device, config):
+def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
     """Evaluate on validation set."""
     model.eval()
     total_loss = 0.0
@@ -311,7 +311,7 @@ def train(config):
         train_emo_acc = train_emotion_correct / max(train_total, 1) * 100
         
         # ── Validation ────────────────────────────────────────────────────
-        val_metrics = evaluate(model, val_loader, loss_fn, device, config)
+        val_metrics = evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer)
         
         epoch_time = time.time() - epoch_start_time
         
