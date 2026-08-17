@@ -3,7 +3,6 @@ vi_ser/classifiers.py
 
 Classification heads:
   - EmotionClassifier:  z_fused → emotion logits [B, num_emotion_classes]
-  - RegionalClassifier: z_audio → regional logits [B, num_regional_classes]
   - TeacherEmotionHead: z_teacher_rep → teacher logits (for KD; frozen gradient)
 """
 
@@ -52,23 +51,6 @@ class EmotionClassifier(MLPClassifier):
         )
 
 
-class RegionalClassifier(MLPClassifier):
-    """
-    Auxiliary task: Regional accent recognition (Bắc / Trung / Nam).
-    Input: z_audio [B, fusion_dim]   — acoustic features only (no text)
-    Output: logits [B, num_regional_classes]
-
-    Using z_audio directly (not z_fused) since regional accent is a
-    purely phonetic/prosodic feature, independent of text content.
-    """
-
-    def __init__(self, config):
-        super().__init__(
-            input_dim=config.fusion_dim,
-            hidden_dim=config.classifier_hidden_dim,
-            num_classes=config.num_regional_classes,
-            dropout=config.dropout,
-        )
 
 
 class TeacherEmotionHead(MLPClassifier):

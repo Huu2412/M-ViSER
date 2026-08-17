@@ -1,23 +1,22 @@
 """
-vi_ser/text_encoder.py
+vi_ser/encoders/text_encoder.py
 
-PhoBERT Text Encoder.
-Encodes Vietnamese text (from student CTC or teacher PhoWhisper) into dense embeddings.
-Uses vinai/phobert-base via HuggingFace transformers.
+BERT Text Encoder.
+Encodes transcribed text (from student CTC or ground-truth teacher) into dense embeddings.
+Uses bert-base-uncased (or any BERT-compatible model) via HuggingFace transformers.
 """
 
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
-from typing import List, Optional, Union
+from typing import List, Optional
 
 
-class PhoBERTTextEncoder(nn.Module):
+class BERTTextEncoder(nn.Module):
     """
-    Encodes Vietnamese text strings into fixed-size dense embeddings.
-    Uses [CLS] token representation from PhoBERT as the utterance embedding.
-
-    Then projects to fusion_dim for AURORA-style cross-modal fusion.
+    Encodes text strings into fixed-size dense embeddings.
+    Uses [CLS] token representation from BERT as the utterance embedding,
+    then projects to fusion_dim for AURORA-style cross-modal fusion.
     """
 
     def __init__(self, config):
@@ -25,19 +24,19 @@ class PhoBERTTextEncoder(nn.Module):
         self.config = config
 
         self.tokenizer = AutoTokenizer.from_pretrained(
-            config.phobert_model_name,
+            config.text_model_name,
             cache_dir=config.cache_dir,
         )
         self.bert = AutoModel.from_pretrained(
-            config.phobert_model_name,
+            config.text_model_name,
             cache_dir=config.cache_dir,
         )
 
-        if config.freeze_phobert:
+        if config.freeze_text_encoder:
             for param in self.bert.parameters():
                 param.requires_grad = False
 
-        # Project PhoBERT [CLS] dim → fusion_dim
+        # Project BERT [CLS] dim → fusion_dim
         self.proj = nn.Sequential(
             nn.Linear(config.text_hidden_size, config.fusion_dim),
             nn.ReLU(),
@@ -51,7 +50,7 @@ class PhoBERTTextEncoder(nn.Module):
         device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """
-        Encode a list of Vietnamese text strings.
+        Encode a list of text strings.
 
         Args:
             texts: List[str] of length B
@@ -63,11 +62,14 @@ class PhoBERTTextEncoder(nn.Module):
         if device is None:
             device = next(self.parameters()).device
 
+        # Replace None or empty with empty string
+        texts = [t if (t and isinstance(t, str)) else "" for t in texts]
+
         encoding = self.tokenizer(
             texts,
             padding=True,
             truncation=True,
-            max_length=256,
+            max_length=128,
             return_tensors="pt",
         )
         encoding = {k: v.to(device) for k, v in encoding.items()}

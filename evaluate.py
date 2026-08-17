@@ -4,9 +4,8 @@ vi_ser/evaluate.py
 Evaluation script for ViSER model.
 Evaluates on test set and reports:
   - Emotion accuracy (UA/WA)
-  - Regional accuracy
   - WER (Word Error Rate from CTC student ASR)
-  - Confusion matrix for emotion and regional
+  - Confusion matrix for emotion
   - Per-class F1 scores
 """
 
@@ -38,7 +37,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EMOTION_NAMES  = ["Neutral", "Happy", "Angry", "Sad"]
-REGIONAL_NAMES = ["North", "Central", "South"]
 
 
 def evaluate_checkpoint(
@@ -75,8 +73,6 @@ def evaluate_checkpoint(
     # ── Collect predictions ──────────────────────────────────────────────────
     all_emotion_preds  = []
     all_emotion_labels = []
-    all_regional_preds  = []
-    all_regional_labels = []
     all_alphas          = []
 
     with torch.no_grad():
@@ -86,7 +82,6 @@ def evaluate_checkpoint(
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
             emotion_labels  = batch["emotion_labels"]
-            regional_labels = batch["regional_labels"]
             student_texts   = batch["student_texts"]
 
             outputs = model(
@@ -99,20 +94,16 @@ def evaluate_checkpoint(
             )
 
             emotion_preds  = outputs["logits_emotion_student"].argmax(-1).cpu()
-            regional_preds = outputs["logits_regional"].argmax(-1).cpu()
             alphas         = outputs["alpha"].squeeze(-1).cpu()
 
             all_emotion_preds.extend(emotion_preds.tolist())
             all_emotion_labels.extend(emotion_labels.tolist())
-            all_regional_preds.extend(regional_preds.tolist())
-            all_regional_labels.extend(regional_labels.tolist())
             all_alphas.extend(alphas.tolist())
 
     # ── Compute metrics ───────────────────────────────────────────────────────
     emo_acc  = accuracy_score(all_emotion_labels, all_emotion_preds)
     emo_ua   = f1_score(all_emotion_labels, all_emotion_preds, average="macro")
     emo_wa   = f1_score(all_emotion_labels, all_emotion_preds, average="weighted")
-    reg_acc  = accuracy_score(all_regional_labels, all_regional_preds)
     avg_alpha = np.mean(all_alphas)
 
     # ── Report ────────────────────────────────────────────────────────────────
@@ -125,9 +116,7 @@ def evaluate_checkpoint(
     print(f"  F1 Weighted:   {emo_wa:.4f}")
     print(f"\n{classification_report(all_emotion_labels, all_emotion_preds, target_names=EMOTION_NAMES)}")
 
-    print(f"\nRegional Recognition (Auxiliary):")
-    print(f"  Accuracy: {reg_acc:.4f}")
-    print(f"\n{classification_report(all_regional_labels, all_regional_preds, target_names=REGIONAL_NAMES)}")
+
 
     print(f"\nModel Statistics:")
     print(f"  Avg. Uncertainty Gate (alpha): {avg_alpha:.4f}")
@@ -138,7 +127,6 @@ def evaluate_checkpoint(
         "emotion_accuracy": emo_acc,
         "emotion_f1_macro": emo_ua,
         "emotion_f1_weighted": emo_wa,
-        "regional_accuracy": reg_acc,
         "avg_uncertainty_alpha": avg_alpha,
     }
 

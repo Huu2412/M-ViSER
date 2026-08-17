@@ -15,6 +15,14 @@ import argparse
 import logging
 import random
 import json
+import warnings
+
+# Giảm thiểu các log thừa từ thư viện
+import transformers
+import datasets
+transformers.logging.set_verbosity_error()
+datasets.logging.set_verbosity_error()
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import torch
@@ -28,7 +36,7 @@ import time
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vi_ser.data_loader.visec import build_dataloaders
+from vi_ser.data_loader.iemocap import build_dataloaders
 from config_loader import load_config
 from vi_ser.factory import (
     create_model,
@@ -37,7 +45,6 @@ from vi_ser.factory import (
     create_scheduler,
     create_acoustic_feature_extractor,
     create_ctc_tokenizer,
-    create_teacher_components,
 )
 
 logging.basicConfig(
@@ -66,7 +73,6 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
     model.eval()
     total_loss = 0.0
     emotion_correct = 0
-    regional_correct = 0
     total = 0
     
     all_emotion_preds = []
@@ -80,7 +86,6 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
             emotion_labels  = batch["emotion_labels"].to(device)
-            regional_labels = batch["regional_labels"].to(device)
             ctc_labels      = batch.get("ctc_labels")
             if ctc_labels is not None:
                 ctc_labels = ctc_labels.to(device)
@@ -99,10 +104,8 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
             loss, loss_dict = loss_fn(
                 logits_emotion_student=outputs["logits_emotion_student"],
                 logits_ctc=outputs["logits_ctc"],
-                logits_regional=outputs["logits_regional"],
                 z_fused=outputs["z_fused"],
                 emotion_labels=emotion_labels,
-                regional_labels=regional_labels,
                 ctc_labels=ctc_labels,
                 input_values=input_values,
                 attention_mask=attention_mask,
@@ -116,7 +119,6 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
             
             emo_preds = outputs["logits_emotion_student"].argmax(-1)
             emotion_correct  += int((emo_preds == emotion_labels).sum())
-            regional_correct += int((outputs["logits_regional"].argmax(-1) == regional_labels).sum())
             
             all_emotion_preds.extend(emo_preds.cpu().tolist())
             all_emotion_labels.extend(emotion_labels.cpu().tolist())
@@ -135,7 +137,6 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
         "emotion_acc":         emotion_correct / total,   # WA = emotion_acc
         "wa":                  wa,
         "ua":                  ua,
-        "regional_acc":        regional_correct / total,
         "macro_f1":            macro_f1,
         "inf_time_ms":         inf_time_ms,
     }
@@ -156,35 +157,20 @@ def train(config):
         )
 
     # ── Load feature extractor ───────────────────────────────────────────────
-    logger.info("Loading ViP-VL feature extractor...")
+    logger.info("Loading Wav2Vec2 feature extractor...")
     feature_extractor = create_acoustic_feature_extractor(config)
 
-    # ── Load CTC tokenizer (Vietnamese) ─────────────────────────────────────
-    logger.info("Loading Vietnamese CTC tokenizer...")
+    # ── Load CTC tokenizer ───────────────────────────────────────────────────
+    logger.info("Loading CTC tokenizer...")
     ctc_tokenizer = create_ctc_tokenizer(config)
     config.vocab_size = len(ctc_tokenizer)
 
-    # ── Load PhoWhisper Teacher ──────────────────────────────────────────────
-    # PhoWhisper chỉ được load nếu dataset có transcript. ViSEC không có text
-    # nên teacher chỉ trả về chuỗi rỗng và gây chậm training đáng kể.
-    # Để tắt: đặt alpha_kd=0 và alpha_ctc=0 trong config.
-    phowhisper_teacher = None
-    teacher_cache = None
-    if getattr(config, 'alpha_kd', 0.0) > 0 or getattr(config, 'alpha_ctc', 0.0) > 0:
-        logger.info("Loading PhoWhisper teacher...")
-        phowhisper_teacher, teacher_cache = create_teacher_components(config, device)
-    else:
-        logger.info("PhoWhisper teacher DISABLED (alpha_kd=0, alpha_ctc=0). Training faster!")
-        from vi_ser.encoders.asr_teacher import TeacherTextCache
-        cache_path = os.path.join(config.cache_dir or "cache_vi_ser", "teacher_texts.pt")
-        teacher_cache = TeacherTextCache(cache_path)
-
-    # ── Build DataLoaders ────────────────────────────────────────────────────
+    # ── Build DataLoaders ─────────────────────────────────────────────────────
+    # Teacher text (clean GT transcripts) is read from the dataset CSV text column.
+    # No external ASR teacher model needed.
     logger.info("Building dataloaders...")
     train_loader, val_loader = build_dataloaders(
         config, feature_extractor, ctc_tokenizer,
-        teacher_cache=teacher_cache,
-        phowhisper_teacher=phowhisper_teacher,
     )
 
     # ── Initialize Model ─────────────────────────────────────────────────────
@@ -222,17 +208,20 @@ def train(config):
     # ── Training Loop ─────────────────────────────────────────────────────────
     top_k_checkpoints = []  # List of tuples: (emotion_acc, save_path)
     max_checkpoints = 3
+    
+    print("\n" + "="*50)
+    print("STARTING TRAINING")
+    print("="*50 + "\n")
 
     for epoch in range(config.num_epochs):
         epoch_start_time = time.time()
         model.train()
         epoch_losses = {
             "l_total": 0.0, "l_emotion_student": 0.0, "l_emotion_teacher": 0.0, "l_emotion": 0.0, "l_ctc": 0.0,
-            "l_kd": 0.0, "l_distill": 0.0, "l_regional": 0.0,
+            "l_kd": 0.0, "l_distill": 0.0,
         }
         n_batches = 0
         train_emotion_correct = 0
-        train_regional_correct = 0
         train_total = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
@@ -242,7 +231,6 @@ def train(config):
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
             emotion_labels  = batch["emotion_labels"].to(device)
-            regional_labels = batch["regional_labels"].to(device)
             ctc_labels      = batch.get("ctc_labels")
             if ctc_labels is not None:
                 ctc_labels = ctc_labels.to(device)
@@ -263,10 +251,8 @@ def train(config):
             loss, loss_dict = loss_fn(
                 logits_emotion_student=outputs["logits_emotion_student"],
                 logits_ctc=outputs["logits_ctc"],
-                logits_regional=outputs["logits_regional"],
                 z_fused=outputs["z_fused"],
                 emotion_labels=emotion_labels,
-                regional_labels=regional_labels,
                 ctc_labels=ctc_labels,
                 input_values=input_values,
                 attention_mask=attention_mask,
@@ -293,14 +279,11 @@ def train(config):
             train_total += B
             with torch.no_grad():
                 emo_preds = outputs["logits_emotion_student"].argmax(-1)
-                reg_preds = outputs["logits_regional"].argmax(-1)
                 train_emotion_correct += int((emo_preds == emotion_labels).sum())
-                train_regional_correct += int((reg_preds == regional_labels).sum())
 
             pbar.set_postfix({
                 "loss": f"{loss_dict['l_total']:.4f}",
                 "emo":  f"{loss_dict['l_emotion']:.4f}",
-                "reg":  f"{loss_dict['l_regional']:.4f}",
                 "kd":   f"{loss_dict['l_kd']:.4f}",
             })
 
@@ -315,13 +298,13 @@ def train(config):
         
         epoch_time = time.time() - epoch_start_time
         
-        # In ra màn hình duy nhất 1 dòng đúng format yêu cầu
-        # Epoch 36 | Train [L:0.0604 L_s_emo:0.0500 L_t_emo:0.0500 L_reg:0.0131 A:98.7%] | Val [L:2.4197 A:69.5% mF1:69.5%] | Time: 614.8s | Inf: 15.2ms | FLOPs: 4.5G
+        # In ra màn hình giống định dạng MaxMViT-MLP-SER
+        # VD: Epoch 01 | Train [L:2.4051 L_emo:1.2051 L_ctc:0.1234 A:54.3%] | Val [L:1.2141 A:65.4% mF1:64.2%] | Time: 120.5s
         log_line = (
             f"Epoch {epoch+1:02d} | "
-            f"Train [L:{epoch_losses['l_total']:.4f} L_s_emo:{epoch_losses['l_emotion_student']:.4f} L_t_emo:{epoch_losses['l_emotion_teacher']:.4f} L_reg:{epoch_losses['l_regional']:.4f} A:{train_emo_acc:.1f}%] | "
+            f"Train [L:{epoch_losses['l_total']:.4f} L_emo:{epoch_losses['l_emotion_student']:.4f} L_ctc:{epoch_losses['l_ctc']:.4f} A:{train_emo_acc:.1f}%] | "
             f"Val [L:{val_metrics['val_loss']:.4f} A:{val_metrics.get('wa', 0)*100:.1f}% mF1:{val_metrics['macro_f1']*100:.1f}%] | "
-            f"Time: {epoch_time:.1f}s | Inf: {val_metrics['inf_time_ms']:.1f}ms | FLOPs: {flops_str}"
+            f"Time: {epoch_time:.1f}s"
         )
         logger.info(log_line)
         print(log_line)
@@ -366,8 +349,6 @@ def train(config):
         else:
             top_k_checkpoints.pop()
 
-    # ── Save teacher cache ────────────────────────────────────────────────
-    teacher_cache.save()
     best_metric = top_k_checkpoints[0][0] if top_k_checkpoints else 0.0
     logger.info(f"Training complete. Best {config.checkpoint_metric}: {best_metric:.4f}")
 
@@ -391,13 +372,11 @@ def _apply_overrides(config, overrides: list):
         "loss.alpha_ctc":       ("alpha_ctc",       float),
         "loss.alpha_kd":        ("alpha_kd",         float),
         "loss.alpha_distill":   ("alpha_distill",   float),
-        "loss.alpha_regional":  ("alpha_regional",  float),
         "loss.kd_temperature":  ("kd_temperature",  float),
         # architecture.*
         "architecture.fusion_dim":            ("fusion_dim",            int),
         "architecture.dropout":               ("dropout",               float),
         "architecture.num_emotion_classes":   ("num_emotion_classes",   int),
-        "architecture.num_regional_classes":  ("num_regional_classes",  int),
         # paths.*
         "paths.train_csv":   ("train_csv",   str),
         "paths.val_csv":     ("val_csv",     str),

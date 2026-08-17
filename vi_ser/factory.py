@@ -10,15 +10,14 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from transformers import Wav2Vec2CTCTokenizer
 
-from .model import ViSERModel
+from .model import SERModel, ViSERModel  # ViSERModel is alias of SERModel
 from .loss import ViSERLoss
 from .encoders.acoustic_encoder import AcousticFeatureExtractor
-from .encoders.asr_teacher import PhoWhisperTeacher, TeacherTextCache
 
 
-def create_model(config, device: torch.device = None) -> ViSERModel:
-    """Instantiate the ViSER model."""
-    model = ViSERModel(config)
+def create_model(config, device: torch.device = None) -> SERModel:
+    """Instantiate the SER model."""
+    model = SERModel(config)
     if device is not None:
         model = model.to(device)
     return model
@@ -33,7 +32,7 @@ def create_optimizer(model: torch.nn.Module, config) -> torch.optim.Optimizer:
     """Create optimizer with discriminative learning rates."""
     backbone_params = []
     head_params = []
-    
+
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -41,24 +40,23 @@ def create_optimizer(model: torch.nn.Module, config) -> torch.optim.Optimizer:
             backbone_params.append(param)
         else:
             head_params.append(param)
-            
+
     optimizer = AdamW([
         {"params": backbone_params, "lr": getattr(config, "backbone_lr", config.learning_rate)},
         {"params": head_params, "lr": getattr(config, "head_lr", config.learning_rate)}
     ], weight_decay=config.weight_decay)
-    
+
     return optimizer
 
 
 def create_scheduler(optimizer: torch.optim.Optimizer, config):
     """Create learning rate scheduler."""
     scheduler_type = getattr(config, "scheduler_type", "plateau").lower()
-    
+
     if scheduler_type == "cosine":
-        # Simplified cosine annealing without warmup for now (or T_max = num_epochs)
         return CosineAnnealingLR(
-            optimizer, 
-            T_max=config.num_epochs, 
+            optimizer,
+            T_max=config.num_epochs,
             eta_min=getattr(config, "scheduler_min_lr", 1e-6)
         )
     else:
@@ -68,14 +66,14 @@ def create_scheduler(optimizer: torch.optim.Optimizer, config):
 
 
 def create_acoustic_feature_extractor(config) -> AcousticFeatureExtractor:
-    """Load ViP-VL acoustic feature extractor."""
+    """Load Wav2Vec2 acoustic feature extractor."""
     return AcousticFeatureExtractor.from_pretrained(
         config.acoustic_model_name, cache_dir=config.cache_dir
     )
 
 
 def create_ctc_tokenizer(config) -> Wav2Vec2CTCTokenizer:
-    """Load CTC tokenizer."""
+    """Load CTC tokenizer from the acoustic model."""
     try:
         return Wav2Vec2CTCTokenizer.from_pretrained(
             config.acoustic_model_name,
@@ -83,31 +81,16 @@ def create_ctc_tokenizer(config) -> Wav2Vec2CTCTokenizer:
             do_lower_case=True,
             word_delimiter_token="|",
         )
-    except TypeError:
-        # Xảy ra khi repo không có vocab.json
+    except Exception:
         import logging
         logger = logging.getLogger(__name__)
-        logger.warning(f"CTC Tokenizer config missing in '{config.acoustic_model_name}'. Falling back to 'nguyenvulebinh/wav2vec2-base-vietnamese-250h'.")
+        logger.warning(
+            f"CTC Tokenizer not found in '{config.acoustic_model_name}'. "
+            "Falling back to 'facebook/wav2vec2-base-960h'."
+        )
         return Wav2Vec2CTCTokenizer.from_pretrained(
-            "nguyenvulebinh/wav2vec2-base-vietnamese-250h",
+            "facebook/wav2vec2-base-960h",
             cache_dir=config.cache_dir,
             do_lower_case=True,
             word_delimiter_token="|",
         )
-
-
-def create_teacher_components(config, device: torch.device = None):
-    """
-    Load PhoWhisper teacher model and text cache.
-    Returns: (teacher_model, teacher_cache)
-    """
-    import os
-    cache_path = os.path.join(config.cache_dir or "cache_vi_ser", "teacher_texts.pt")
-    teacher_cache = TeacherTextCache(cache_path)
-    
-    phowhisper_teacher = PhoWhisperTeacher(
-        model_name=config.phowhisper_model_name,
-        cache_dir=config.cache_dir,
-        device=str(device) if device is not None else None,
-    )
-    return phowhisper_teacher, teacher_cache

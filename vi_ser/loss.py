@@ -7,7 +7,6 @@ L_total = L_emotion                     (CE — primary emotion classification)
         + alpha_ctc     * L_ctc         (CTC — student ASR auxiliary task)
         + alpha_kd      * L_kd          (KL  — knowledge distillation student||teacher)
         + alpha_distill * L_distill     (MSE — representation alignment z_fused||z_teacher_rep)
-        + alpha_regional * L_regional   (CE  — regional accent auxiliary task)
 """
 
 import torch
@@ -25,7 +24,6 @@ class ViSERLoss(nn.Module):
       2. CTC ASR loss (student auxiliary — from MTL-SER)
       3. KL knowledge distillation (student emotion logits || teacher emotion logits)
       4. MSE representation alignment (z_fused || z_teacher_rep)
-      5. Regional accent CE (auxiliary)
     """
 
     def __init__(self, config):
@@ -35,7 +33,6 @@ class ViSERLoss(nn.Module):
         self.alpha_ctc      = config.alpha_ctc
         self.alpha_kd       = config.alpha_kd
         self.alpha_distill  = config.alpha_distill
-        self.alpha_regional = config.alpha_regional
         self.temperature    = config.kd_temperature
         self.ctc_zero_infinity = config.ctc_zero_infinity
 
@@ -47,11 +44,7 @@ class ViSERLoss(nn.Module):
             emotion_weights = torch.tensor(emotion_weights, dtype=torch.float)
         self.ce_loss = nn.CrossEntropyLoss(weight=emotion_weights, label_smoothing=label_smoothing)
 
-        # Regional CE Loss
-        regional_weights = getattr(config, "regional_class_weights", None)
-        if regional_weights is not None:
-            regional_weights = torch.tensor(regional_weights, dtype=torch.float)
-        self.regional_ce_loss = nn.CrossEntropyLoss(weight=regional_weights, label_smoothing=label_smoothing)
+
 
         self.mse_loss = nn.MSELoss()
         self.kl_loss  = nn.KLDivLoss(reduction="batchmean")
@@ -120,11 +113,9 @@ class ViSERLoss(nn.Module):
         # ── Student outputs ──────────────────────────────────────────────────
         logits_emotion_student: torch.Tensor,    # [B, num_emotion_classes]
         logits_ctc:             torch.Tensor,    # [B, T, vocab_size]
-        logits_regional:        torch.Tensor,    # [B, num_regional_classes]
         z_fused:                torch.Tensor,    # [B, fusion_dim]
         # ── Labels ───────────────────────────────────────────────────────────
         emotion_labels:   torch.Tensor,          # [B]
-        regional_labels:  torch.Tensor,          # [B]
         ctc_labels:       torch.Tensor = None,   # [B, L] padded with -100
         input_values:     torch.Tensor = None,   # [B, T_audio]
         attention_mask:   torch.Tensor = None,
@@ -182,14 +173,7 @@ class ViSERLoss(nn.Module):
             l_distill = self.mse_loss(z_fused, z_teacher_rep.detach())
         loss_dict["l_distill"] = l_distill.item()
 
-        # ── 5. Auxiliary: Regional Recognition (CE) ──────────────────────────
-        l_regional = torch.tensor(0.0, device=device)
-        if regional_labels is not None and self.alpha_regional > 0:
-            # Ensure weights are on the correct device if they exist
-            if self.regional_ce_loss.weight is not None and self.regional_ce_loss.weight.device != device:
-                self.regional_ce_loss.weight = self.regional_ce_loss.weight.to(device)
-            l_regional = self.regional_ce_loss(logits_regional, regional_labels)
-        loss_dict["l_regional"] = l_regional.item()
+
 
         # ── Total Loss ────────────────────────────────────────────────────────
         l_total = (
@@ -198,7 +182,6 @@ class ViSERLoss(nn.Module):
             + self.alpha_ctc      * l_ctc
             + self.alpha_kd       * l_kd
             + self.alpha_distill  * l_distill
-            + self.alpha_regional * l_regional
         )
         loss_dict["l_total"] = l_total.item()
 

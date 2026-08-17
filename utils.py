@@ -415,8 +415,7 @@ def seconds_to_samples(seconds: float, sampling_rate: int = 16000) -> int:
 EMOTION_ID2NAME: Dict[int, str] = {0: "Neutral", 1: "Happy", 2: "Angry", 3: "Sad"}
 EMOTION_NAME2ID: Dict[str, int] = {v: k for k, v in EMOTION_ID2NAME.items()}
 
-REGIONAL_ID2NAME: Dict[int, str] = {0: "North", 1: "Central", 2: "South"}
-REGIONAL_NAME2ID: Dict[str, int] = {v: k for k, v in REGIONAL_ID2NAME.items()}
+
 
 
 def decode_emotion_labels(label_ids: List[int]) -> List[str]:
@@ -424,9 +423,6 @@ def decode_emotion_labels(label_ids: List[int]) -> List[str]:
     return [EMOTION_ID2NAME.get(i, f"unk_{i}") for i in label_ids]
 
 
-def decode_regional_labels(label_ids: List[int]) -> List[str]:
-    """Convert list of regional label indices → human-readable names."""
-    return [REGIONAL_ID2NAME.get(i, f"unk_{i}") for i in label_ids]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

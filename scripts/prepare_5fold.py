@@ -54,14 +54,12 @@ def prepare_visec_5fold(output_dir: str = "data"):
         
         # Thu thập metadata
         emotion = item.get("emotion", "neutral")
-        regional = item.get("accent", "north")
         text = item.get("text", "")
         speaker_id = item.get("speaker_id", item.get("speaker", "unknown"))
         
         records.append({
             "file": save_path,
             "emotion": emotion,
-            "regional": regional,
             "text": text,
             "speaker_id": speaker_id
         })

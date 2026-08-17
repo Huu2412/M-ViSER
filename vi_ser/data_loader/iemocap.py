@@ -7,13 +7,12 @@ CSV format expected (columns):
   file      - path to audio file (.wav, 16kHz preferred)
   text      - clean transcript (ground truth text, may be empty)
   emotion   - emotion label (e.g. "e0", "e1", "e2", "e3")
-  regional  - regional label (e.g. "north", "central", "south")
   speaker   - speaker ID (optional, for future speaker-level analysis)
 
 The dataset:
   1. Loads audio with librosa (resamples to 16kHz)
   2. Pre-computes PhoWhisper teacher transcriptions (cached to disk)
-  3. Returns: input_values, attention_mask, ctc_labels, emotion_label, regional_label,
+  3. Returns: input_values, attention_mask, ctc_labels, emotion_label,
               teacher_text (PhoWhisper), student_text (ground_truth or empty)
 """
 
@@ -34,7 +33,7 @@ class ViSERDataset(Dataset):
     """
     Dataset for ViSER training/evaluation.
 
-    For training: loads audio, emotion label, regional label, clean text.
+    For training: loads audio, emotion label, clean text.
     PhoWhisper teacher transcriptions are loaded from cache or computed on-demand.
     """
 
@@ -68,8 +67,6 @@ class ViSERDataset(Dataset):
     
             # Validate required columns
             required = [config.speech_col, config.emotion_col]
-            if not audio_only:
-                required.append(config.regional_col)
             for col in required:
                 assert col in self.df.columns, f"Missing column: {col}"
 
@@ -164,7 +161,6 @@ class ViSERDataset(Dataset):
             filepath = audio_info.get("path", f"hf_audio_{idx}")
             
             emotion_str = str(item_hf.get("emotion", "neutral"))
-            regional_str = str(item_hf.get("accent", item_hf.get("regional", "north")))
             clean_text = str(item_hf.get("text", ""))
         else:
             row = self.df.iloc[idx]
@@ -172,7 +168,6 @@ class ViSERDataset(Dataset):
             speech, sr = self._load_audio(filepath)
             
             emotion_str = str(row[self.config.emotion_col])
-            regional_str = str(row[self.config.regional_col])
             clean_text = str(row.get(self.config.text_col, ""))
             
         if sr != self.config.sampling_rate:
@@ -206,10 +201,6 @@ class ViSERDataset(Dataset):
                 self.config.emotion_label_map[emotion_str], dtype=torch.long
             )
 
-            # ── Regional label ──────────────────────────────────────────────
-            item["regional_label"] = torch.tensor(
-                self.config.regional_label_map[regional_str], dtype=torch.long
-            )
 
             # ── Teacher text (PhoWhisper transcription) ────────────────────
             if self.is_training:
@@ -260,7 +251,6 @@ class ViSERCollator:
         # ── Pad labels ───────────────────────────────────────────────────
         if "emotion_label" in features[0]:
             batch["emotion_labels"]  = torch.stack([f["emotion_label"]  for f in features])
-            batch["regional_labels"] = torch.stack([f["regional_label"] for f in features])
 
         # ── Pad CTC labels (fill with -100 for ignored positions) ─────────
         ctc_labels_list = [f.get("ctc_labels") for f in features]

@@ -7,7 +7,6 @@ from .factory import (
     create_scheduler,
     create_acoustic_feature_extractor,
     create_ctc_tokenizer,
-    create_teacher_components,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "create_scheduler",
     "create_acoustic_feature_extractor",
     "create_ctc_tokenizer",
-    "create_teacher_components",
 ]

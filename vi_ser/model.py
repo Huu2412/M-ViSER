@@ -1,48 +1,42 @@
 """
 vi_ser/model.py
 
-ViSER: Vietnamese Speech Emotion Recognition Model
+SER Model: Speech Emotion Recognition
 ======================================================
-Integrates MTL-SER (CTC student ASR) + AURORA (Audio-Guided Repair Fusion)
-for Vietnamese speech with regional accent auxiliary task.
+Integrates MTL-SER (CTC student ASR) + AURORA (Audio-Guided Repair Fusion).
 
 Architecture Overview:
 ──────────────────────────────────────────────────────────────────────────────
   Raw Audio
       │
       ▼
-  ViP-VL Encoder ──────────────────────────────────────────────┐
-      │                                                          │
-      ├── CTC Head → logits_ctc (Student ASR auxiliary)          │
-      └── z_audio [B, fusion_dim] (mean-pooled + projected)     │
-                                                                 │
-  CTC decode → Vietnamese text (student)                        │
-      │                                                          │
-  PhoBERT → z_asr_student [B, fusion_dim]                       │
-                                                                 │
-  ┌────────────────────────────────────────────────────────┐    │
-  │                   Student Path                          │    │
-  │                                                         │    │
-  │  CrossModalEncoders(z_audio, z_asr_student)            │    │
-  │  → RepairMLP → z_repaired                              │    │
-  │  → UncertaintyGate → alpha                             │    │
-  │  → AudioGuidedGMU → z_fused                            │    │
-  │                                                         │    │
-  └────────────────────────────────────────────────────────┘    │
-                                                                 │
-  ┌────────────────────────────────────────────────────────┐    │
-  │                   Teacher Path (training only)          │    │
-  │                                                         │    │
-  │  PhoWhisper text → PhoBERT → z_clean_text             │    │
-  │  CrossModalEncoders(z_audio, z_clean_text)             │    │
-  │  AudioGuidedGMU(g=1.0, alpha=1.0) → z_teacher_rep     │    │
-  │  TeacherEmotionHead → logits_teacher                   │    │
-  │                                                         │    │
-  └────────────────────────────────────────────────────────┘    │
-                                                                 │
-  Classifiers:                                                   │
-      z_fused  → EmotionClassifier  → logits_emotion (primary)  │
-      z_audio  → RegionalClassifier → logits_regional (aux)  ───┘
+  Wav2Vec2 Encoder ─────────────────────────────────────────────────────────┐
+      │                                                                       │
+      ├── CTC Head → logits_ctc  (Student ASR auxiliary, from MTL-SER)       │
+      └── z_audio [B, fusion_dim] (mean-pooled + projected)                  │
+                                                                              │
+  CTC decode → text (student)                                                │
+      │                                                                       │
+  BERT → z_asr_student [B, fusion_dim]                                       │
+                                                                              │
+  ┌────────────────────────────────────────────────────────────────────┐     │
+  │                    Student Path                                      │     │
+  │  CrossModalEncoders(z_audio, z_asr_student)                        │     │
+  │  → RepairMLP → z_repaired                                          │     │
+  │  → UncertaintyGate → alpha                                         │     │
+  │  → AudioGuidedGMU → z_fused                                        │     │
+  └────────────────────────────────────────────────────────────────────┘     │
+                                                                              │
+  ┌────────────────────────────────────────────────────────────────────┐     │
+  │                    Teacher Path (training only)                      │     │
+  │  Ground-truth text → BERT → z_clean_text                           │     │
+  │  CrossModalEncoders(z_audio, z_clean_text)                         │     │
+  │  AudioGuidedGMU(alpha=1.0) → z_teacher_rep                         │     │
+  │  TeacherEmotionHead → logits_emotion_teacher                       │     │
+  └────────────────────────────────────────────────────────────────────┘     │
+                                                                              │
+  Classifiers:
+      z_fused → EmotionClassifier → logits_emotion_student  (primary)
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -52,39 +46,38 @@ from typing import Dict, List, Optional, Tuple
 
 from .config import ViSERConfig
 from .encoders.acoustic_encoder import Wav2Vec2AcousticEncoder
-from .encoders.text_encoder import PhoBERTTextEncoder
+from .encoders.text_encoder import BERTTextEncoder
 from .fusion.cross_modal import CrossModalEncoders
 from .fusion.repair_gate import RepairMLP, UncertaintyGate
 from .fusion.audio_guided_gmu import AudioGuidedGatedFusion
-from .fusion.classifiers import EmotionClassifier, RegionalClassifier, TeacherEmotionHead
+from .fusion.classifiers import EmotionClassifier, TeacherEmotionHead
 
 
-class ViSERModel(nn.Module):
+class SERModel(nn.Module):
     """
-    ViSER: Vietnamese Speech Emotion Recognition.
+    Speech Emotion Recognition model.
 
     Combines:
       - Wav2Vec2 acoustic backbone with CTC head (student ASR, from MTL-SER)
-      - PhoBERT text encoder (for CTC text and teacher text)
+      - BERT text encoder (for CTC text and teacher clean text)
       - AURORA-style Audio-Guided Repair + Gated Fusion
       - Primary: Emotion classification
-      - Auxiliary: Regional accent recognition (Bắc/Trung/Nam)
       - Auxiliary: CTC speech recognition
-      - Teacher-student KD: PhoWhisper teacher → CTC student
+      - Teacher-student KD: Clean GT text teacher → CTC student
     """
 
     def __init__(self, config: ViSERConfig):
         super().__init__()
         self.config = config
 
-        # ── Acoustic Encoder (ViP-VL + CTC head) ────────────────────────────
+        # ── Acoustic Encoder (Wav2Vec2 + CTC head) ───────────────────────────
         self.acoustic_encoder = Wav2Vec2AcousticEncoder(config)
 
-        # ── Text Encoder (PhoBERT) ───────────────────────────────────────────
-        self.text_encoder = PhoBERTTextEncoder(config)
+        # ── Text Encoder (BERT) ──────────────────────────────────────────────
+        self.text_encoder = BERTTextEncoder(config)
 
-        # ── Student & Teacher Shared Fusion Modules ──────────────────────────────
-        # CrossModal: both inputs already at fusion_dim (projected by respective encoders)
+        # ── Shared Fusion Modules (AURORA-style) ─────────────────────────────
+        # CrossModal: both inputs already at fusion_dim (projected by encoders)
         self.shared_cross_modal = CrossModalEncoders(
             audio_input_dim=config.fusion_dim,
             text_input_dim=config.fusion_dim,
@@ -112,14 +105,13 @@ class ViSERModel(nn.Module):
             dropout=config.dropout,
         )
 
-        # ── Classifier Heads ─────────────────────────────────────────────────
-        self.emotion_classifier  = EmotionClassifier(config)
-        self.regional_classifier = RegionalClassifier(config)
+        self.emotion_classifier = EmotionClassifier(config)
+        self.teacher_emotion_classifier = TeacherEmotionHead(config)
 
     def _student_forward(
         self,
         z_audio: torch.Tensor,       # [B, fusion_dim]
-        student_texts: List[str],    # CTC-decoded Vietnamese text
+        student_texts: List[str],    # CTC-decoded text
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Student path: audio + CTC text → z_fused via Repair Gate + GMU.
@@ -129,16 +121,16 @@ class ViSERModel(nn.Module):
             z_repaired: [B, fusion_dim]
             alpha:      [B, 1]
         """
-        # Encode student ASR text with PhoBERT
+        # Encode student CTC text with BERT
         z_asr_student = self.text_encoder(student_texts, device=z_audio.device)
 
-        # Cross-modal alignment (both already at fusion_dim, this refines)
+        # Cross-modal alignment
         z_audio_enc, z_text_enc = self.shared_cross_modal(z_audio, z_asr_student)
 
         # Repair noisy CTC text embedding using audio guidance
         z_repaired = self.repair_mlp(z_audio_enc, z_text_enc)
 
-        # Uncertainty gate: how reliable is the CTC student text?
+        # Uncertainty gate: how reliable is the CTC text?
         alpha = self.uncertainty_gate(z_audio_enc, z_text_enc)
 
         # Audio-guided gated fusion
@@ -149,38 +141,36 @@ class ViSERModel(nn.Module):
     def _teacher_forward(
         self,
         z_audio: torch.Tensor,       # [B, fusion_dim]
-        teacher_texts: List[str],    # PhoWhisper-transcribed Vietnamese text
+        teacher_texts: List[str],    # Ground-truth transcripts (clean)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Teacher path (training only): audio + clean text → teacher_rep + logits.
-        Teacher text from PhoWhisper is higher quality, no repair needed.
-        alpha=1.0 (full confidence in clean text).
+        Teacher path (training only): audio + clean GT text → teacher_rep + logits.
+        alpha=1.0 (full confidence in clean text, no repair needed).
 
         Returns:
-            z_teacher_rep:    [B, fusion_dim]
-            logits_teacher:   [B, num_emotion_classes]
+            z_teacher_rep:         [B, fusion_dim]
+            logits_emotion_teacher: [B, num_emotion_classes]
         """
         z_clean_text = self.text_encoder(teacher_texts, device=z_audio.device)
         z_audio_enc, z_text_enc = self.shared_cross_modal(z_audio, z_clean_text)
 
-        # Teacher uses full alpha=1.0 (clean text, maximum confidence)
+        # Teacher uses full alpha=1.0 (clean text → maximum confidence)
         alpha_ones = torch.ones(z_audio.size(0), 1, device=z_audio.device)
         z_teacher_rep = self.shared_gmu(z_audio_enc, z_text_enc, alpha_ones)
 
-        logits_teacher = self.emotion_classifier(z_teacher_rep)
-        return z_teacher_rep, logits_teacher
+        logits_emotion_teacher = self.teacher_emotion_classifier(z_teacher_rep)
+        return z_teacher_rep, logits_emotion_teacher
 
     def decode_ctc(self, logits_ctc: torch.Tensor, processor) -> List[str]:
         """
         Greedy CTC decode to get student text.
-        Uses the Wav2Vec2 processor tokenizer (same as MTL-SER).
 
         Args:
             logits_ctc: [B, T, V]
-            processor: Wav2Vec2Processor with Vietnamese tokenizer
+            processor: Wav2Vec2Processor / Wav2Vec2CTCTokenizer
 
         Returns:
-            List of decoded Vietnamese strings
+            List of decoded strings
         """
         pred_ids = logits_ctc.argmax(dim=-1)  # [B, T]
         texts = processor.batch_decode(pred_ids.cpu())
@@ -193,9 +183,9 @@ class ViSERModel(nn.Module):
         attention_mask: torch.Tensor = None,
         # ── Text inputs ───────────────────────────────────────────────────────
         student_texts: List[str] = None,      # CTC decoded text (or pre-decoded)
-        teacher_texts: List[str] = None,      # PhoWhisper text (training only)
+        teacher_texts: List[str] = None,      # Ground-truth transcripts (training only)
         # ── Processor for CTC decode (if student_texts not pre-decoded) ───────
-        processor = None,
+        processor=None,
         # ── Mode ──────────────────────────────────────────────────────────────
         training_mode: bool = True,           # True: teacher path enabled
     ) -> Dict:
@@ -205,14 +195,13 @@ class ViSERModel(nn.Module):
         Returns dict with:
             logits_emotion_student: [B, num_emotion_classes]
             logits_ctc:             [B, T, vocab_size]
-            logits_regional:        [B, num_regional_classes]
             z_fused:                [B, fusion_dim]
             alpha:                  [B, 1]
             --- teacher outputs (only if training_mode=True and teacher_texts provided) ---
             logits_emotion_teacher: [B, num_emotion_classes]
             z_teacher_rep:          [B, fusion_dim]
         """
-        # ── Step 1: Acoustic Encoding (ViP-VL) ──────────────────────────────
+        # ── Step 1: Acoustic Encoding (Wav2Vec2) ─────────────────────────────
         acoustic_out = self.acoustic_encoder(
             input_values=input_values,
             attention_mask=attention_mask,
@@ -233,14 +222,12 @@ class ViSERModel(nn.Module):
         # ── Step 3: Student Path (AURORA Repair + GMU) ───────────────────────
         z_fused, z_repaired, alpha = self._student_forward(z_audio, student_texts)
 
-        # ── Step 4: Emotion & Regional Classification ─────────────────────────
+        # ── Step 4: Emotion Classification ───────────────────────────────────
         logits_emotion_student = self.emotion_classifier(z_fused)    # [B, num_emo]
-        logits_regional        = self.regional_classifier(z_audio)   # [B, num_reg]
 
         output = {
             "logits_emotion_student": logits_emotion_student,
             "logits_ctc":             logits_ctc,
-            "logits_regional":        logits_regional,
             "z_fused":                z_fused,
             "z_repaired":             z_repaired,
             "alpha":                  alpha,
@@ -261,12 +248,12 @@ class ViSERModel(nn.Module):
         return output
 
     def freeze_acoustic_backbone(self):
-        """Freeze all ViP-VL parameters."""
+        """Freeze all Wav2Vec2 parameters."""
         for param in self.acoustic_encoder.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_acoustic_backbone(self):
-        """Unfreeze ViP-VL for fine-tuning."""
+        """Unfreeze Wav2Vec2 for fine-tuning."""
         for param in self.acoustic_encoder.encoder.parameters():
             param.requires_grad = True
         # Re-freeze CNN feature extractor
@@ -279,3 +266,7 @@ class ViSERModel(nn.Module):
             counts[name] = sum(p.numel() for p in module.parameters() if p.requires_grad)
         counts["total"] = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return counts
+
+
+# Backward-compatible alias
+ViSERModel = SERModel

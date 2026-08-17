@@ -1,10 +1,10 @@
-# ViSER Optimized Configuration File
+# SER Model Configuration File
 # ============================================================
-# Tích hợp cơ chế Discriminative LRs, Cosine Scheduler
-# và Waveform Augmentations.
+# Multi-Task Learning (MTL-SER) + AURORA Repair Fusion
+# Dataset: IEMOCAP (or other English-language SER datasets)
 # ============================================================
 
-experiment_name: "viser_optimized"
+experiment_name: "ser_mtl_aurora"
 
 # ── Paths ────────────────────────────────────────────────────
 paths:
@@ -12,39 +12,25 @@ paths:
   val_csv:     "data/fold_1/val.csv"
   test_csv:    "data/test.csv"
   output_dir:  "checkpoints"
-  cache_dir:   "cache_vi_ser"
-  log_dir:     "logs_vi_ser"
+  cache_dir:   "cache_ser"
+  log_dir:     "logs_ser"
 
-# ── Dataset & Augmentation ───────────────────────────────────
+# ── Dataset ──────────────────────────────────────────────────
 dataset:
-  hf_dataset:    "hustep-lab/ViSEC"
+  hf_dataset:    "AbstractTTS/IEMOCAP"
   current_fold:  1
-  
+
   speech_col:    "file"
-  text_col:      "text"
+  text_col:      "text"       # column containing ground-truth transcripts (for teacher)
   emotion_col:   "emotion"
-  regional_col:  "regional"
   emotion_label_map:
-    # Tên đầy đủ (format trong ViSEC Hugging Face)
-    neutral: 0
-    happy:   1
-    angry:   2
-    sad:     3
-    # Alias dạng mã (e0/e1/e2/e3 - format cũ)
-    e0: 0
-    e1: 1
-    e2: 2
-    e3: 3
-  regional_label_map:
-    # Tên đầy đủ (format trong ViSEC Hugging Face)
-    north:   0   # Bắc
-    mid:     1   # Trung (ViSEC dùng 'mid')
-    south:   2   # Nam
-    # Alias tương thích (format cũ)
-    central: 1   # Alias khác của miền Trung
+    neu: 0
+    hap: 1
+    ang: 2
+    sad: 3
   augmentations:
     waveform_augment:
-      prob: 0.0
+      prob: 0.5
       pitch_shift:
         weight: 0.4
         n_steps_range: [-1.0, 1.0]
@@ -57,49 +43,49 @@ dataset:
 
 # ── Model & Architecture ─────────────────────────────────────
 model:
-  acoustic:               "nguyenvulebinh/wav2vec2-base-vietnamese-250h"
-  phowhisper:             "vinai/PhoWhisper-medium"
-  phobert:                "vinai/phobert-base"
+  # Acoustic backbone (Wav2Vec2 for English)
+  acoustic:               "facebook/wav2vec2-base-960h"
+  # Text encoder (BERT for English)
+  text_model:             "bert-base-uncased"
+
   fusion_dim:             512
   repair_hidden_dim:      256
   classifier_hidden_dim:  256
   num_emotion_classes:    4
-  num_regional_classes:   3
   num_heads:              8
-  dropout:                0.3       # Tăng từ 0.1 lên 0.3 để chống overfitting
+  dropout:                0.3
   delta_scale:            0.3
   uncertainty_alpha_min:  0.05
   uncertainty_alpha_max:  0.95
 
 # ── Freeze Settings ──────────────────────────────────────────
 freeze:
-  feature_extractor:  true    # CNN layers của ViP-VL (luôn freeze)
-  acoustic_encoder:   false   # Transformer layers của ViP-VL (finetune)
-  phobert:            true    # ĐÓNG BĂNG PhoBERT: tránh bị nhiễu do text xấu
-  teacher:            true    # PhoWhisper luôn frozen
+  feature_extractor:  true    # CNN layers of Wav2Vec2 (always frozen)
+  acoustic_encoder:   false   # Transformer layers of Wav2Vec2 (finetune)
+  text_encoder:       false   # BERT (finetune)
 
 # ── Loss Weights ─────────────────────────────────────────────
 loss:
-  alpha_student_emotion: 0.5  # Trọng số loss cảm xúc của nhánh Student
-  alpha_teacher_emotion: 0.5  # Trọng số loss cảm xúc của nhánh Teacher
-  alpha_ctc:       0.2
-  alpha_kd:        0.5
-  alpha_distill:   0.0    # Đã tắt theo yêu cầu
-  alpha_regional:  0.5
-  kd_temperature:  2.0
+  alpha_student_emotion: 1.0   # Weight for student emotion CE loss
+  alpha_teacher_emotion: 0.5   # Weight for teacher emotion CE loss
+  alpha_ctc:             0.2   # Weight for CTC ASR auxiliary loss
+  alpha_kd:              0.5   # Weight for KL knowledge distillation
+  alpha_distill:         0.0   # Weight for MSE representation alignment
+  kd_temperature:        2.0
+  label_smoothing:       0.05
 
 # ── Training ─────────────────────────────────────────────────
 training:
   epochs:                     50
   batch_size:                 8
-  num_workers:                0      # Đặt về 0 để tránh lỗi 'Broken pipe' trên Windows
+  num_workers:                0      # Set 0 to avoid 'Broken pipe' on Windows
   gradient_accumulation_steps: 4
-  
-  # --- LRs ---
+
+  # --- Learning Rates ---
   lr:                         0.0002
-  backbone_lr:                0.00003  # Giảm LR backbone từ 1e-4 xuống 3e-5 (rất quan trọng)
-  head_lr:                    0.0005
-  
+  backbone_lr:                0.00001  # Low LR for pre-trained backbones
+  head_lr:                    0.0005   # Higher LR for fusion/classifier heads
+
   # --- Misc ---
   warmup_epochs:              3
   weight_decay:               0.01
@@ -108,8 +94,8 @@ training:
   ctc_zero_infinity:          true
   seed:                       42
   grad_clip_norm:             1.0
-  label_smoothing:            0.05    # Tránh overconfident
-  
+  label_smoothing:            0.05
+
   # --- Checkpoint & Scheduler ---
   checkpoint_metric:          "macro_f1"
   scheduler:
@@ -120,5 +106,5 @@ training:
 # ── Logging ──────────────────────────────────────────────────
 logging:
   use_wandb:      false
-  wandb_project:  "viser"
+  wandb_project:  "ser_mtl_aurora"
   log_steps:      50
