@@ -157,6 +157,11 @@ class ViSERDataset(Dataset):
             if speech.ndim > 1:
                 speech = speech.squeeze()
 
+            # --- Chống lỗi NaN do audio quá ngắn / file hỏng ---
+            if len(speech) < 400:  # < 25ms, quá ngắn để phân tích
+                logger.warning(f"Audio quá ngắn hoặc rỗng tại {audio_info.get('path')}. Đang chèn audio tĩnh để chống lỗi NaN.")
+                speech = np.zeros(self.config.sampling_rate, dtype=np.float32)
+
             filepath = audio_info.get("path") or item_hf.get("file", f"hf_audio_{idx}")
 
             # ── Emotion: hỗ trợ cả 'emotion', 'major_emotion' (IEMOCAP) ──────
