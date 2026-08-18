@@ -261,6 +261,12 @@ def train(config):
                 acoustic_encoder=outputs["acoustic_encoder"],
             )
 
+            # ── Safe Guard: Check for NaN/Inf loss ───────────────────────────
+            if not torch.isfinite(loss):
+                logger.warning(f"NaN/Inf loss detected at step {step} (L_emo={loss_dict.get('l_emotion_student')}, L_ctc={loss_dict.get('l_ctc')}). Skipping batch!")
+                optimizer.zero_grad()
+                continue
+
             # ── Backward & gradient accumulation ─────────────────────────
             loss = loss / config.gradient_accumulation_steps
             loss.backward()

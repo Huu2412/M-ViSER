@@ -56,8 +56,9 @@ class Wav2Vec2AcousticEncoder(nn.Module):
 
     def _freeze_feature_extractor(self):
         """Freeze CNN feature extractor layers (same as Wav2Vec2)."""
-        # ViP-VL exposes feature_extractor or encoder.feature_extractor
-        if hasattr(self.encoder, "feature_extractor"):
+        if hasattr(self.encoder, "freeze_feature_encoder"):
+            self.encoder.freeze_feature_encoder()
+        elif hasattr(self.encoder, "feature_extractor"):
             for param in self.encoder.feature_extractor.parameters():
                 param.requires_grad = False
         elif hasattr(self.encoder, "encoder") and hasattr(

@@ -229,9 +229,11 @@ class ViSERDataset(Dataset):
             
             if target_text_for_ctc and self.ctc_tokenizer is not None:
                 ctc_ids = self.ctc_tokenizer(target_text_for_ctc).input_ids
+                if len(ctc_ids) == 0:
+                    ctc_ids = [self.ctc_tokenizer.pad_token_id]
                 item["ctc_labels"] = torch.tensor(ctc_ids, dtype=torch.long)
             else:
-                item["ctc_labels"] = None
+                item["ctc_labels"] = torch.tensor([self.ctc_tokenizer.pad_token_id], dtype=torch.long)
             
             # Luôn set student_text = None để model.py tự động decode_ctc (Bắt buộc cho Repair Gate)
             item["student_text"] = None
