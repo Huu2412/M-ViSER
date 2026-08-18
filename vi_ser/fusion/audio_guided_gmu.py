@@ -44,7 +44,7 @@ class AudioGuidedGatedFusion(nn.Module):
         # Feed-forward refinement network
         self.fusion_ffn = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim * 2),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(fusion_dim * 2, fusion_dim),
             nn.Dropout(dropout),

@@ -39,7 +39,7 @@ class BERTTextEncoder(nn.Module):
         # Project BERT [CLS] dim → fusion_dim
         self.proj = nn.Sequential(
             nn.Linear(config.text_hidden_size, config.fusion_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.LayerNorm(config.fusion_dim),
             nn.Dropout(config.dropout),
         )

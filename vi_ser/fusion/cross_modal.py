@@ -16,8 +16,8 @@ class CrossModalEncoders(nn.Module):
     into the same fusion_dim space for cross-modal interaction.
 
     Input:
-        z_audio: [B, audio_dim]  (from ViP-VL audio_proj OR raw hidden_size)
-        z_text:  [B, text_dim]   (from PhoBERT proj)
+        z_audio: [B, audio_dim]  (from Wav2Vec2 audio_proj)
+        z_text:  [B, text_dim]   (from BERT [CLS] proj)
 
     Output:
         z_audio_enc: [B, fusion_dim]
@@ -35,14 +35,14 @@ class CrossModalEncoders(nn.Module):
 
         self.audio_encoder = nn.Sequential(
             nn.Linear(audio_input_dim, fusion_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.LayerNorm(fusion_dim),
             nn.Dropout(dropout),
         )
 
         self.text_encoder = nn.Sequential(
             nn.Linear(text_input_dim, fusion_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.LayerNorm(fusion_dim),
             nn.Dropout(dropout),
         )

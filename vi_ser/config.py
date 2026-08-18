@@ -92,7 +92,7 @@ class ViSERConfig:
     text_col: str = "text"
     emotion_col: str = "emotion"
 
-    augment_prob: float = 0.5
+    augment_prob: float = 0.0
     augment_pitch_weight: float = 0.4
     augment_pitch_steps: List[float] = field(default_factory=lambda: [-1.0, 1.0])
     augment_noise_weight: float = 0.4

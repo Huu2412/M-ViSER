@@ -39,7 +39,7 @@ class RepairMLP(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Linear(audio_dim + text_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
@@ -88,7 +88,7 @@ class UncertaintyGate(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(audio_dim + text_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )

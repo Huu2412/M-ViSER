@@ -1,11 +1,10 @@
 """
-vi_ser/acoustic_encoder.py
+vi_ser/encoders/acoustic_encoder.py
 
-ViP-VL Acoustic Encoder with CTC head (Student ASR).
-ViP-VL uses ChunkFormer architecture loaded via AutoModel.
+Wav2Vec2 Acoustic Encoder with CTC head (Student ASR auxiliary task from MTL-SER).
 Provides:
-  - hidden_states: [B, T, H]  (frame-level for CTC)
-  - z_audio:       [B, D]     (mean-pooled utterance embedding)
+  - hidden_states: [B, T, H]  (frame-level for CTC loss)
+  - z_audio:       [B, D]     (mean-pooled utterance embedding → fusion_dim)
   - logits_ctc:    [B, T, V]  (CTC logits for student ASR)
 """
 
@@ -17,8 +16,9 @@ from transformers import AutoModel, AutoFeatureExtractor
 
 class Wav2Vec2AcousticEncoder(nn.Module):
     """
-    Wraps the configured acoustic model (e.g. nguyenvulebinh/wav2vec2-base-vietnamese-250h) as the acoustic backbone.
-    Also contains a CTC head that mirrors the student ASR task in MTL-SER.
+    Wraps the configured Wav2Vec2 acoustic model (e.g. facebook/wav2vec2-base-960h)
+    as the acoustic backbone. Also contains a CTC head that mirrors the student ASR
+    auxiliary task in MTL-SER.
     """
 
     def __init__(self, config):
@@ -49,7 +49,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         # ── Projection to fusion_dim for downstream AURORA fusion ────────────
         self.audio_proj = nn.Sequential(
             nn.Linear(self.hidden_size, config.fusion_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.LayerNorm(config.fusion_dim),
             nn.Dropout(config.dropout),
         )
