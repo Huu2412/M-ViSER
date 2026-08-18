@@ -28,7 +28,7 @@ from sklearn.metrics import (
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vi_ser.config import ViSERConfig
-from vi_ser.data_loader.dataset import ViSERDataset, ViSERCollator
+from vi_ser.data_loader.iemocap import ViSERDataset, ViSERCollator
 from config_loader import load_config
 from torch.utils.data import DataLoader
 from vi_ser.factory import create_model, create_acoustic_feature_extractor, create_ctc_tokenizer

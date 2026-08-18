@@ -1,19 +1,18 @@
 """
-vi_ser/dataset.py
+vi_ser/data_loader/iemocap.py
 
-Dataset class for ViSER training.
+Dataset class for M-ViSER training on IEMOCAP (or any English SER dataset).
 
-CSV format expected (columns):
-  file      - path to audio file (.wav, 16kHz preferred)
-  text      - clean transcript (ground truth text, may be empty)
-  emotion   - emotion label (e.g. "e0", "e1", "e2", "e3")
-  speaker   - speaker ID (optional, for future speaker-level analysis)
+Supports two modes:
+  1. HuggingFace Dataset (hf_dataset in config) — auto 5-fold speaker-independent split
+  2. CSV file (train_csv / val_csv in config) with columns:
+       file      - path to audio file (.wav, 16kHz)
+       text      - ground-truth transcript (used as teacher text)
+       emotion   - emotion label (e.g. "neu", "hap", "ang", "sad")
 
-The dataset:
-  1. Loads audio with librosa (resamples to 16kHz)
-  2. Pre-computes PhoWhisper teacher transcriptions (cached to disk)
-  3. Returns: input_values, attention_mask, ctc_labels, emotion_label,
-              teacher_text (PhoWhisper), student_text (ground_truth or empty)
+Returns per sample:
+  input_values, attention_mask, ctc_labels, emotion_label,
+  teacher_text (ground-truth transcript), student_text (None → CTC decode online)
 """
 
 import os
@@ -31,20 +30,20 @@ logger = logging.getLogger(__name__)
 
 class ViSERDataset(Dataset):
     """
-    Dataset for ViSER training/evaluation.
+    Dataset for IEMOCAP / English SER training and evaluation.
 
-    For training: loads audio, emotion label, clean text.
-    PhoWhisper teacher transcriptions are loaded from cache or computed on-demand.
+    Loads audio, emotion label, and ground-truth transcript (teacher text).
+    Teacher text is taken directly from the dataset (no external ASR needed).
     """
 
     def __init__(
         self,
         csv_path: str,
         config,
-        feature_extractor,          # ViP-VL AutoFeatureExtractor
-        ctc_tokenizer,              # Wav2Vec2CTCTokenizer for Vietnamese
-        teacher_cache=None,         # TeacherTextCache instance (optional)
-        phowhisper_teacher=None,    # PhoWhisperTeacher for online transcription
+        feature_extractor,          # Wav2Vec2 AutoFeatureExtractor
+        ctc_tokenizer,              # Wav2Vec2CTCTokenizer (English)
+        teacher_cache=None,         # Unused — kept for API compatibility
+        phowhisper_teacher=None,    # Unused — removed (was Vietnamese only)
         is_training: bool = True,
         audio_only: bool = False,   # Inference mode: no text labels
         hf_dataset=None,            # Hugging Face Dataset subset
@@ -81,23 +80,8 @@ class ViSERDataset(Dataset):
         return speech, sr
 
     def _get_teacher_text(self, filepath: str, speech: np.ndarray) -> str:
-        """Get PhoWhisper teacher transcription (from cache or online)."""
-        if self.teacher_cache is not None:
-            cached = self.teacher_cache.get(filepath)
-            if cached is not None:
-                return cached
-
-        if self.phowhisper_teacher is not None:
-            texts = self.phowhisper_teacher.transcribe(
-                [torch.tensor(speech)],
-                sampling_rate=self.config.sampling_rate,
-            )
-            text = texts[0]
-            if self.teacher_cache is not None:
-                self.teacher_cache.set(filepath, text)
-            return text
-
-        # Fallback: use ground truth text if available
+        """Get teacher text: ground-truth from dataset (no ASR inference needed)."""
+        # Fallback: return empty string; actual GT text is passed via clean_text in __getitem__
         return ""
 
     def _apply_augmentations(self, speech: np.ndarray, sr: int) -> np.ndarray:
@@ -132,13 +116,29 @@ class ViSERDataset(Dataset):
             
         return speech
 
+    # Map từ IEMOCAP major_emotion (English full names) sang label map keys
+    _IEMOCAP_EMOTION_MAP = {
+        "neutral":    "neu",
+        "happy":      "hap",
+        "excited":    "hap",   # excited → happy (gộp như chuẩn IEMOCAP 4-class)
+        "angry":      "ang",
+        "frustrated": "ang",   # frustrated → angry
+        "sad":        "sad",
+        "disgust":    "ang",
+        "fear":       "sad",
+        "surprise":   "hap",
+    }
+
     def __getitem__(self, idx: int) -> Dict:
         if self.hf_dataset is not None:
             item_hf = self.hf_dataset[idx]
-            audio_info = item_hf["path"]
+
+            # ── Audio: AbstractTTS/IEMOCAP dùng column 'audio' {bytes, path} ──
+            audio_info = item_hf.get("audio") or item_hf.get("path")
             if not isinstance(audio_info, dict):
                 audio_info = {
                     "path": getattr(audio_info, "path", f"audio_{idx}.wav"),
+                    "bytes": getattr(audio_info, "bytes", None),
                     "array": getattr(audio_info, "array", None),
                     "sampling_rate": getattr(audio_info, "sampling_rate", 16000)
                 }
@@ -150,18 +150,33 @@ class ViSERDataset(Dataset):
                 import soundfile as sf
                 speech, sr = sf.read(io.BytesIO(audio_info["bytes"]))
                 speech = np.array(speech, dtype=np.float32)
+                sr = int(sr)
             else:
-                # Cố gắng load từ ổ cứng nếu path tồn tại
-                import librosa
                 speech, sr = librosa.load(audio_info["path"], sr=self.config.sampling_rate)
-                
+
             if speech.ndim > 1:
                 speech = speech.squeeze()
-            
-            filepath = audio_info.get("path", f"hf_audio_{idx}")
-            
-            emotion_str = str(item_hf.get("emotion", "neutral"))
-            clean_text = str(item_hf.get("text", ""))
+
+            filepath = audio_info.get("path") or item_hf.get("file", f"hf_audio_{idx}")
+
+            # ── Emotion: hỗ trợ cả 'emotion', 'major_emotion' (IEMOCAP) ──────
+            raw_emotion = (
+                item_hf.get("emotion")
+                or item_hf.get("major_emotion")
+                or "neutral"
+            )
+            raw_emotion = str(raw_emotion).lower().strip()
+            # Nếu đã là short-code (neu/hap/ang/sad) thì giữ nguyên
+            if raw_emotion not in self.config.emotion_label_map:
+                raw_emotion = self._IEMOCAP_EMOTION_MAP.get(raw_emotion, "neu")
+            emotion_str = raw_emotion
+
+            # ── Text: hỗ trợ 'text', 'transcription' (IEMOCAP) ──────────────
+            clean_text = str(
+                item_hf.get("text")
+                or item_hf.get("transcription")
+                or ""
+            )
         else:
             row = self.df.iloc[idx]
             filepath = row[self.config.speech_col]
@@ -279,22 +294,40 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         import datasets
         from sklearn.model_selection import GroupKFold
         import pandas as pd
-        
+        import re
+
         logger.info(f"Loading HF dataset {config.hf_dataset} ...")
-        # Ép cast về Audio(decode=False) để lấy raw bytes, tránh lỗi của thư viện datasets
         ds = datasets.load_dataset(config.hf_dataset, split="train")
-        ds = ds.cast_column("path", datasets.Audio(decode=False))
-        
-        speaker_col = "speaker_id" if "speaker_id" in ds.column_names else "speaker"
-        speaker_ids = ds[speaker_col]
-        
+
+        # Cast audio column về decode=False (raw bytes) — hỗ trợ cả 'audio' và 'path'
+        audio_col = "audio" if "audio" in ds.column_names else "path"
+        ds = ds.cast_column(audio_col, datasets.Audio(decode=False))
+
+        # ── Xác định speaker_id để split speaker-independent ────────────────
+        if "speaker_id" in ds.column_names:
+            speaker_ids = ds["speaker_id"]
+        elif "speaker" in ds.column_names:
+            speaker_ids = ds["speaker"]
+        else:
+            # AbstractTTS/IEMOCAP: extract speaker từ filename  Ses01F_impro01_F000 → '1F'
+            file_col = "file" if "file" in ds.column_names else None
+            if file_col:
+                def extract_speaker(fname):
+                    m = re.match(r"Ses(\d+[MF])", str(fname))
+                    return m.group(1) if m else str(fname)[:4]
+                speaker_ids = [extract_speaker(f) for f in ds[file_col]]
+            else:
+                speaker_ids = [str(i % 10) for i in range(len(ds))]
+                logger.warning("No speaker column found — using dummy speaker IDs.")
+
         df = pd.DataFrame({"speaker_id": speaker_ids})
         gkf = GroupKFold(n_splits=5)
         splits = list(gkf.split(df, groups=df["speaker_id"]))
-        
+
         fold_idx = config.current_fold - 1
         train_idx, val_idx = splits[fold_idx]
-        
+        logger.info(f"Fold {config.current_fold}: train={len(train_idx)}, val={len(val_idx)}")
+
         train_hf_ds = ds.select(train_idx)
         val_hf_ds = ds.select(val_idx)
         

@@ -382,6 +382,10 @@ def _apply_overrides(config, overrides: list):
         "paths.val_csv":     ("val_csv",     str),
         "paths.output_dir":  ("output_dir",  str),
         "paths.cache_dir":   ("cache_dir",   str),
+        "paths.log_dir":     ("log_dir",     str),
+        # dataset.*
+        "dataset.current_fold": ("current_fold", int),
+        "dataset.hf_dataset":   ("hf_dataset",   str),
     }
     for override in overrides:
         if "=" not in override:
