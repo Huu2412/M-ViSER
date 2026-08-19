@@ -105,18 +105,28 @@ class Wav2Vec2AcousticEncoder(nn.Module):
     ):
         """
         Compute CTC output lengths from input audio lengths.
-        Uses dynamic ratio: (actual_audio_len / max_audio_len) * max_feat_len
+        Always prioritizes HF's accurate `_get_feat_extract_output_lengths`.
         """
+        if hasattr(self.encoder, "_get_feat_extract_output_lengths"):
+            # Ensure it works with tensor inputs
+            if isinstance(input_lengths, torch.Tensor):
+                input_lengths_np = input_lengths.cpu().numpy()
+                out_lens = self.encoder._get_feat_extract_output_lengths(input_lengths_np)
+                lengths = torch.tensor(out_lens, device=input_lengths.device, dtype=torch.long)
+            else:
+                lengths = self.encoder._get_feat_extract_output_lengths(input_lengths)
+                
+            if max_output_len is not None:
+                return lengths.clamp(min=1, max=max_output_len)
+            return lengths
+
+        # Fallback ratio approximation
         if max_input_len is not None and max_output_len is not None:
             lengths = torch.round(
                 input_lengths.float() * (max_output_len / max_input_len)
             ).long()
-            # Clamp giữa [1, max_output_len] để tránh out-of-range
             return lengths.clamp(min=1, max=max_output_len)
 
-        # Fallback if dimensions are not provided
-        if hasattr(self.encoder, "_get_feat_extract_output_lengths"):
-            return self.encoder._get_feat_extract_output_lengths(input_lengths)
         return (input_lengths - 1) // 320 + 1
 
     def _sanitize_audio(self, input_values: torch.Tensor) -> torch.Tensor:

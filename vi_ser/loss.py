@@ -78,34 +78,42 @@ class ViSERLoss(nn.Module):
 
         labels_mask = ctc_labels >= 0
         target_lengths = labels_mask.sum(-1)
-        flattened_targets = ctc_labels.masked_select(labels_mask)
 
         # ── Guard: skip samples where input_len < target_len (CTC requirement) ──
-        # CTC yêu cầu input_length >= target_length, nếu không sẽ trả -inf/NaN.
         valid_mask = input_lengths >= target_lengths
         if not valid_mask.all():
             import logging
             logging.getLogger(__name__).warning(
-                f"CTC: {(~valid_mask).sum().item()} samples bị loại do "
-                f"input_length < target_length. Clamp input_lengths."
+                f"CTC: {(~valid_mask).sum().item()} samples bị loại do input_length < target_length."
             )
-            # Clamp để CTC không crash: tăng input_lengths lên bằng target_lengths
-            input_lengths = torch.maximum(input_lengths, target_lengths)
+            # Sửa lại ctc_labels của các sample lỗi để vượt qua vòng kiểm tra của F.ctc_loss
+            # (chúng ta sẽ xoá loss của chúng đi sau)
+            ctc_labels = ctc_labels.clone()
+            ctc_labels[~valid_mask] = -100
+            ctc_labels[~valid_mask, 0] = 0  # dummy token
+            
+            # Tính lại
+            labels_mask = ctc_labels >= 0
+            target_lengths = labels_mask.sum(-1)
+
+        flattened_targets = ctc_labels.masked_select(labels_mask)
 
         # Clamp log_probs để tránh -inf
         log_probs = F.log_softmax(logits_ctc.float(), dim=-1).transpose(0, 1)
         log_probs = log_probs.clamp(min=-100.0)
 
         with torch.backends.cudnn.flags(enabled=False):
-            loss = F.ctc_loss(
+            loss_all = F.ctc_loss(
                 log_probs,
                 flattened_targets,
                 input_lengths,
                 target_lengths,
-                blank=0,  # pad_token_id
-                reduction="mean",
-                zero_infinity=True,  # Always True để chắc chắn không NaN
+                blank=self.pad_token_id,
+                reduction="none",
+                zero_infinity=self.zero_infinity,
             )
+            # Chỉ lấy loss của các sample hợp lệ
+            loss = (loss_all * valid_mask.float().to(loss_all.device)).sum() / (valid_mask.sum().float().to(loss_all.device) + 1e-8)
 
         # Final guard: nếu vẫn NaN/Inf thì trả 0
         if not torch.isfinite(loss):
