@@ -230,6 +230,10 @@ def train(config):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
             input_values = batch["input_values"].to(device).float()  # force float32
+            # CRITICAL: Add tiny noise to break exact 0.0 padding. Wav2Vec2 feature extractor
+            # produces NaN internally if given perfectly silent (0.0) padding frames.
+            input_values = input_values + torch.randn_like(input_values) * 1e-6
+            
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
@@ -275,6 +279,18 @@ def train(config):
             loss.backward()
 
             if (step + 1) % config.gradient_accumulation_steps == 0:
+                # CRITICAL: Prevent NaN gradients from corrupting optimizer state
+                has_nan_grad = False
+                for param in model.parameters():
+                    if param.grad is not None and not torch.isfinite(param.grad).all():
+                        has_nan_grad = True
+                        break
+                
+                if has_nan_grad:
+                    logger.warning(f"NaN gradients detected at step {step}! Skipping optimizer step to save weights.")
+                    optimizer.zero_grad()
+                    continue
+
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
