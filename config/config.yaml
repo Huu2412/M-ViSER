@@ -53,7 +53,7 @@ freeze:
 
 # ── Loss Weights ─────────────────────────────────────────────
 loss:
-  alpha_student_emotion: 1.0   # Weight for student emotion CE loss
+  alpha_student_emotion: 0.5   # Weight for student emotion CE loss
   alpha_teacher_emotion: 0.5   # Weight for teacher emotion CE loss
   alpha_ctc:             0.2   # Weight for CTC ASR auxiliary loss
   alpha_kd:              0.5   # Weight for KL knowledge distillation
