@@ -93,6 +93,14 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             z_audio:       [B, fusion_dim] - mean-pooled + projected
             logits_ctc:    [B, T, vocab_size] - CTC logits
         """
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
+
+        # ── Guard 1: sanitize input audio (NaN/Inf từ dataset) ──────────────
+        if not torch.isfinite(input_values).all():
+            _logger.warning("NaN/Inf detected in input_values. Replacing with zeros.")
+            input_values = torch.nan_to_num(input_values, nan=0.0, posinf=1.0, neginf=-1.0)
+
         outputs = self.encoder(
             input_values,
             attention_mask=attention_mask,
@@ -101,6 +109,12 @@ class Wav2Vec2AcousticEncoder(nn.Module):
 
         # Last layer hidden states: [B, T, H]
         hidden_states = outputs[0].float()  # Cast to float32 để tránh overflow
+
+        # ── Guard 2: sanitize hidden_states từ Wav2Vec2 ──────────────────────
+        if not torch.isfinite(hidden_states).all():
+            _logger.warning("NaN/Inf detected in Wav2Vec2 hidden_states. Replacing with zeros.")
+            hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=0.0, neginf=0.0)
+
         hidden_states = self.dropout(hidden_states)
 
         # CTC logits (Student ASR) - same as MTL-SER lm_head
@@ -129,14 +143,24 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         else:
             z_audio = hidden_states.mean(dim=1)  # [B, H]
 
+        # ── Guard 3: sanitize z_audio TRƯỚC audio_proj ───────────────────────
+        # QUAN TRỌNG: LayerNorm trong audio_proj sẽ ra NaN nếu nhận
+        # vector all-zero hoặc all-identical (variance=0). Đây là ROOT CAUSE
+        # của warning "NaN/Inf detected in z_audio after projection".
+        if not torch.isfinite(z_audio).all():
+            _logger.warning("NaN/Inf detected in z_audio after pooling. Replacing with zeros.")
+            z_audio = torch.nan_to_num(z_audio, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Thêm tiny noise để tránh degenerate LayerNorm input (all-zero vector)
+        # Điều này không ảnh hưởng đáng kể đến training nhưng ngăn NaN hoàn toàn.
+        if (z_audio.std(dim=-1) < 1e-6).any():
+            z_audio = z_audio + 1e-6 * torch.randn_like(z_audio)
+
         z_audio = self.audio_proj(z_audio)  # [B, fusion_dim]
 
-        # ── NaN guard: thay NaN/Inf bằng 0 (trường hợp audio khống) ──
+        # ── Guard 4: final check sau audio_proj ──────────────────────────────
         if not torch.isfinite(z_audio).all():
-            import logging
-            logging.getLogger(__name__).warning(
-                "NaN/Inf detected in z_audio after projection. Replacing with zeros."
-            )
+            _logger.warning("NaN/Inf detected in z_audio after audio_proj. Replacing with zeros.")
             z_audio = torch.nan_to_num(z_audio, nan=0.0, posinf=0.0, neginf=0.0)
 
         if not torch.isfinite(logits_ctc).all():
