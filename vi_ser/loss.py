@@ -112,7 +112,12 @@ class ViSERLoss(nn.Module):
                 reduction="none",
                 zero_infinity=self.ctc_zero_infinity,
             )
-            # Chỉ lấy loss của các sample hợp lệ
+            
+            # Chia cho target_lengths để chuẩn hoá (giống hệt reduction='mean' mặc định của PyTorch)
+            # Dùng clamp(min=1) để tránh chia cho 0 với những sample bị lỗi
+            loss_all = loss_all / target_lengths.clamp(min=1).float().to(loss_all.device)
+            
+            # Chỉ lấy loss của các sample hợp lệ và tính trung bình qua batch
             loss = (loss_all * valid_mask.float().to(loss_all.device)).sum() / (valid_mask.sum().float().to(loss_all.device) + 1e-8)
 
         # Final guard: nếu vẫn NaN/Inf thì trả 0
