@@ -283,6 +283,7 @@ class ViSERCollator:
         batch = self.feature_extractor.pad(
             input_features,
             padding=True,
+            return_attention_mask=True,
             return_tensors="pt",
         )
 
