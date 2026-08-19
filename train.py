@@ -188,7 +188,9 @@ def train(config):
     # ── Loss & Optimizer ─────────────────────────────────────────────────────
     loss_fn = create_loss(config)
     optimizer = create_optimizer(model, config)
-    scheduler = create_scheduler(optimizer, config)
+    
+    steps_per_epoch = max(1, len(train_loader) // config.gradient_accumulation_steps)
+    scheduler = create_scheduler(optimizer, config, steps_per_epoch=steps_per_epoch)
 
     # ── Compute FLOPs (using thop if available) ──────────────────────────────
     flops_str = "N/A"
@@ -293,6 +295,8 @@ def train(config):
 
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step()
                 optimizer.zero_grad()
 
             # Track losses & accuracy
@@ -335,11 +339,9 @@ def train(config):
         print(log_line)
         sys.stdout.flush()
 
-        # Scheduler step
-        if isinstance(scheduler, ReduceLROnPlateau):
+        # Scheduler step (only for Plateau, step-based schedulers are updated per batch)
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             scheduler.step(val_metrics.get(config.checkpoint_metric, val_metrics["macro_f1"]))
-        else:
-            scheduler.step()
 
         # ── Save top-k models ───────────────────────────────────────────────
         current_metric = val_metrics.get(config.checkpoint_metric, val_metrics["macro_f1"])

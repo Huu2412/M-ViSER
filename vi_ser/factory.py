@@ -49,15 +49,24 @@ def create_optimizer(model: torch.nn.Module, config) -> torch.optim.Optimizer:
     return optimizer
 
 
-def create_scheduler(optimizer: torch.optim.Optimizer, config):
+def create_scheduler(optimizer: torch.optim.Optimizer, config, steps_per_epoch: int = None):
     """Create learning rate scheduler."""
     scheduler_type = getattr(config, "scheduler_type", "plateau").lower()
 
     if scheduler_type == "cosine":
-        return CosineAnnealingLR(
+        from transformers import get_cosine_schedule_with_warmup
+        # Nếu truyền steps_per_epoch, scheduler sẽ tính theo step (batch) thay vì epoch
+        if steps_per_epoch is not None:
+            num_training_steps = config.num_epochs * steps_per_epoch
+            num_warmup_steps = getattr(config, "scheduler_warmup_epochs", 3) * steps_per_epoch
+        else:
+            num_training_steps = config.num_epochs
+            num_warmup_steps = getattr(config, "scheduler_warmup_epochs", 3)
+            
+        return get_cosine_schedule_with_warmup(
             optimizer,
-            T_max=config.num_epochs,
-            eta_min=getattr(config, "scheduler_min_lr", 1e-6)
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
         )
     else:
         return ReduceLROnPlateau(
