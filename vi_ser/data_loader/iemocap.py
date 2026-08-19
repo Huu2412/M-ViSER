@@ -210,6 +210,7 @@ class ViSERDataset(Dataset):
 
         # Filter by max duration
         max_len = int(self.config.max_audio_length_sec * self.config.sampling_rate)
+        is_truncated = len(speech) > max_len
         speech = speech[:max_len]
 
         # ── Sanitize audio ─────────────────────────────────────────────────
@@ -262,6 +263,7 @@ class ViSERDataset(Dataset):
             
             # Luôn set student_text = None để model.py tự động decode_ctc (Bắt buộc cho Repair Gate)
             item["student_text"] = None
+            item["is_truncated"] = is_truncated
 
         return item
 
@@ -288,8 +290,11 @@ class ViSERCollator:
 
         # ── Collect text fields ───────────────────────────────────────────
         batch["files"]         = [f.get("file", "") for f in features]
-        batch["student_texts"] = [f.get("student_text", "") for f in features]
         batch["teacher_texts"] = [f.get("teacher_text", "") for f in features]
+        batch["student_texts"] = [f.get("student_text", None) for f in features]
+        
+        if "is_truncated" in features[0]:
+            batch["is_truncated"] = torch.tensor([f["is_truncated"] for f in features], dtype=torch.bool)
 
         # ── Pad labels ───────────────────────────────────────────────────
         if "emotion_label" in features[0]:

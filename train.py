@@ -231,6 +231,7 @@ def train(config):
         train_total = 0
         total_invalid_len = 0
         total_invalid_align = 0
+        total_truncated = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
@@ -305,6 +306,10 @@ def train(config):
             
             B = input_values.size(0)
             train_total += B
+            
+            if "is_truncated" in batch:
+                total_truncated += int(batch["is_truncated"].sum().item())
+                
             with torch.no_grad():
                 emo_preds = outputs["logits_emotion_student"].argmax(-1)
                 train_emotion_correct += int((emo_preds == emotion_labels).sum())
@@ -339,6 +344,11 @@ def train(config):
             invalid_ratio = total_invalid_ctc / train_total * 100
             logger.warning(f"CTC invalid samples: {total_invalid_ctc}/{train_total} ({invalid_ratio:.2f}%) [Length: {total_invalid_len}, Alignment: {total_invalid_align}]")
             print(f"CTC invalid: total = {total_invalid_ctc} ({invalid_ratio:.2f}%) | length_invalid = {total_invalid_len}, ctc_zero_infinity = {total_invalid_align}")
+            
+        if train_total > 0:
+            truncated_ratio = total_truncated / train_total * 100
+            logger.info(f"Audio Truncated: {total_truncated}/{train_total} ({truncated_ratio:.2f}%)")
+            print(f"Audio Truncated: {total_truncated}/{train_total} ({truncated_ratio:.2f}%)")
         
         # ── Validation ────────────────────────────────────────────────────
         val_metrics = evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer)
