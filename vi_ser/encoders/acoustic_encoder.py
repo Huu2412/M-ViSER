@@ -108,11 +108,15 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         Always prioritizes HF's accurate `_get_feat_extract_output_lengths`.
         """
         if hasattr(self.encoder, "_get_feat_extract_output_lengths"):
-            # Ensure it works with tensor inputs
+            # PyTorch `transformers` library usually expects a Tensor now because it uses `torch.div` internally.
+            # Passing a numpy array will crash `torch.div`.
             if isinstance(input_lengths, torch.Tensor):
-                input_lengths_np = input_lengths.cpu().numpy()
-                out_lens = self.encoder._get_feat_extract_output_lengths(input_lengths_np)
-                lengths = torch.tensor(out_lens, device=input_lengths.device, dtype=torch.long)
+                out_lens = self.encoder._get_feat_extract_output_lengths(input_lengths)
+                # Đảm bảo kết quả trả về là tensor
+                if not isinstance(out_lens, torch.Tensor):
+                    lengths = torch.tensor(out_lens, device=input_lengths.device, dtype=torch.long)
+                else:
+                    lengths = out_lens.to(input_lengths.device).long()
             else:
                 lengths = self.encoder._get_feat_extract_output_lengths(input_lengths)
                 
