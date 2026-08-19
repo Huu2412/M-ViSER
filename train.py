@@ -282,21 +282,16 @@ def train(config):
 
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 # CRITICAL: Prevent NaN gradients from corrupting optimizer state
-                has_nan_grad = False
-                for param in model.parameters():
-                    if param.grad is not None and not torch.isfinite(param.grad).all():
-                        has_nan_grad = True
-                        break
+                # Tối ưu hoá: Sử dụng trực tiếp grad_norm trả về từ clip_grad_norm_ thay vì loop tay
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=getattr(config, "grad_clip_norm", 1.0))
                 
-                if has_nan_grad:
-                    logger.warning(f"NaN gradients detected at step {step}! Skipping optimizer step to save weights.")
-                    optimizer.zero_grad()
-                    continue
-
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    scheduler.step()
+                if not torch.isfinite(grad_norm):
+                    logger.warning(f"NaN/Inf gradients detected at step {step} (norm={grad_norm})! Skipping optimizer step to save weights.")
+                else:
+                    optimizer.step()
+                    if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step()
+                        
                 optimizer.zero_grad()
 
             # Track losses & accuracy
