@@ -229,7 +229,8 @@ def train(config):
         n_batches = 0
         train_emotion_correct = 0
         train_total = 0
-        total_invalid_ctc = 0
+        total_invalid_len = 0
+        total_invalid_align = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
@@ -298,7 +299,8 @@ def train(config):
             # Track losses & accuracy
             for k in epoch_losses:
                 epoch_losses[k] += loss_dict.get(k, 0.0)
-            total_invalid_ctc += loss_dict.get("invalid_ctc_samples", 0)
+            total_invalid_len += loss_dict.get("invalid_ctc_length", 0)
+            total_invalid_align += loss_dict.get("invalid_ctc_alignment", 0)
             n_batches += 1
             
             B = input_values.size(0)
@@ -332,10 +334,11 @@ def train(config):
         
         train_emo_acc = train_emotion_correct / max(train_total, 1) * 100
         
+        total_invalid_ctc = total_invalid_len + total_invalid_align
         if train_total > 0 and total_invalid_ctc > 0:
             invalid_ratio = total_invalid_ctc / train_total * 100
-            logger.warning(f"CTC invalid samples: {total_invalid_ctc}/{train_total} ({invalid_ratio:.2f}%)")
-            print(f"CTC invalid: total samples = {train_total}, invalid = {total_invalid_ctc}, ratio = {invalid_ratio:.2f}%")
+            logger.warning(f"CTC invalid samples: {total_invalid_ctc}/{train_total} ({invalid_ratio:.2f}%) [Length: {total_invalid_len}, Alignment: {total_invalid_align}]")
+            print(f"CTC invalid: total = {total_invalid_ctc} ({invalid_ratio:.2f}%) | length_invalid = {total_invalid_len}, ctc_zero_infinity = {total_invalid_align}")
         
         # ── Validation ────────────────────────────────────────────────────
         val_metrics = evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer)
