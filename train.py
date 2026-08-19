@@ -176,6 +176,9 @@ def train(config):
     # ── Initialize Model ─────────────────────────────────────────────────────
     logger.info("Initializing ViSER model...")
     model = create_model(config, device)
+    # CRITICAL: Force float32. Wav2Vec2 attention overflows in float16 on GPU
+    # causing NaN in hidden_states for long/loud audio sequences.
+    model = model.float()
 
     param_counts = model.count_parameters()
     logger.info("Trainable parameters per module:")
@@ -226,7 +229,7 @@ def train(config):
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
-            input_values   = batch["input_values"].to(device)
+            input_values = batch["input_values"].to(device).float()  # force float32
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
