@@ -108,7 +108,7 @@ class ViSERLoss(nn.Module):
                 flattened_targets,
                 input_lengths,
                 target_lengths,
-                blank=self.pad_token_id,
+                blank=0,  # pad_token_id
                 reduction="none",
                 zero_infinity=self.zero_infinity,
             )
