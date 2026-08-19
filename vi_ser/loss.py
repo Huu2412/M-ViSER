@@ -110,7 +110,7 @@ class ViSERLoss(nn.Module):
                 target_lengths,
                 blank=0,  # pad_token_id
                 reduction="none",
-                zero_infinity=self.zero_infinity,
+                zero_infinity=self.ctc_zero_infinity,
             )
             # Chỉ lấy loss của các sample hợp lệ
             loss = (loss_all * valid_mask.float().to(loss_all.device)).sum() / (valid_mask.sum().float().to(loss_all.device) + 1e-8)
