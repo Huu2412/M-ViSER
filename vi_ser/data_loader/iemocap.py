@@ -145,14 +145,24 @@ class ViSERDataset(Dataset):
             if audio_info.get("array") is not None:
                 speech = np.array(audio_info["array"], dtype=np.float32)
                 sr = audio_info.get("sampling_rate", 16000)
+                # Normalize nếu là raw PCM integer (amplitude > 1)
+                if np.abs(speech).max() > 1.0:
+                    speech = speech / 32768.0
             elif audio_info.get("bytes") is not None:
                 import io
                 import soundfile as sf
-                speech, sr = sf.read(io.BytesIO(audio_info["bytes"]))
+                # dtype='float32' tự động normalize PCM int16 -> [-1, 1]
+                # Đây là fix cho lỗi: sf.read() mặc định trả về int16 -> amplitude lên tới 32767!
+                speech, sr = sf.read(io.BytesIO(audio_info["bytes"]), dtype='float32')
                 speech = np.array(speech, dtype=np.float32)
                 sr = int(sr)
             else:
                 speech, sr = librosa.load(audio_info["path"], sr=self.config.sampling_rate)
+            
+            # Final safety clip: đảm bảo audio trong [-1, 1] trước khi vào Wav2Vec2
+            max_amp = np.abs(speech).max()
+            if max_amp > 1.0:
+                speech = speech / max_amp
 
             if speech.ndim > 1:
                 speech = speech.squeeze()
