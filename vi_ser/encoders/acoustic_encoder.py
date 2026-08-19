@@ -58,6 +58,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         self.encoder = AutoModel.from_pretrained(
             config.acoustic_model_name,
             cache_dir=config.cache_dir,
+            apply_spec_augment=False,  # CRITICAL: Prevent zero-variance NaN on short audio
             use_safetensors=False,
             attn_implementation="eager",  # CRITICAL: Fixes Wav2Vec2 SDPA NaN bug on padded tokens
         )
