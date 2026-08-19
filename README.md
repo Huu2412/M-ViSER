@@ -1,12 +1,12 @@
-# ViSER: Vietnamese Speech Emotion Recognition
+# M-ViSER (AURORA): Multimodal Speech Emotion Recognition
 
-ViSER (Vietnamese Speech Emotion Recognition) is a specialized speech emotion recognition system for the Vietnamese language. The project utilizes a Multimodal Fusion architecture that combines the power of state-of-the-art models.
+M-ViSER is a state-of-the-art multimodal speech emotion recognition (SER) system featuring the robust AURORA fusion architecture. It natively supports both standard English benchmarking on IEMOCAP and is extensible to other languages like Vietnamese.
 
 ## 🚀 Key Features
 
-- **Acoustic Backbone**: Utilizes [ViP-VL](https://huggingface.co/khanhld/vip-vl-base-vie) (ChunkFormer) or Wav2Vec2 for acoustic feature extraction.
-- **Text Backbone**: Employs [PhoBERT-base](https://huggingface.co/vinai/phobert-base) for semantic processing.
-- **ASR Teacher**: Uses [PhoWhisper-medium](https://huggingface.co/vinai/PhoWhisper-medium) as a "Teacher" to generate high-quality transcriptions.
+- **Acoustic Backbone**: Utilizes Wav2Vec2 (e.g., `facebook/wav2vec2-base-960h`) for robust acoustic feature extraction and CTC representation.
+- **Text Backbone**: Employs BERT (e.g., `bert-base-uncased`) for deep semantic text processing.
+- **ASR Teacher**: Uses Whisper models as a "Teacher" to provide high-quality transcriptions and distill robust linguistic knowledge.
 - **AURORA Fusion Architecture**: Integrates a **Bidirectional Multi-Head Cross-Attention** module for cross-modal interaction, a **Repair MLP** (to correct ASR spelling errors), and an **Audio-Guided Gated Multimodal Unit (GMU)** with an Uncertainty Gate, allowing the model to dynamically assess the reliability of the generated text.
 - **Multi-task Learning & Knowledge Distillation**: The model is trained using a Dual-Branch approach where the Teacher (Clean Text) distills knowledge to the Student (ASR Text) via KL divergence and Representation Alignment (MSE). It also performs Connectionist Temporal Classification (CTC) as an auxiliary ASR task.
 - **Standard Benchmarking**: Built-in support for IEMOCAP standard evaluation (LOSO-5-fold cross-validation on 4 emotion classes: neutral, happy, angry, sad) and imbalanced data handling via Class Weights.
