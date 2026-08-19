@@ -164,18 +164,8 @@ class ViSERDataset(Dataset):
             else:
                 speech, sr = librosa.load(audio_info["path"], sr=self.config.sampling_rate)
             
-            # Final safety clip: đảm bảo audio trong [-1, 1] trước khi vào Wav2Vec2
-            max_amp = np.abs(speech).max()
-            if max_amp > 1.0:
-                speech = speech / max_amp
-
             if speech.ndim > 1:
                 speech = speech.squeeze()
-
-            # --- Chống lỗi NaN do audio quá ngắn / file hỏng ---
-            if len(speech) < 400:  # < 25ms, quá ngắn để phân tích
-                logger.warning(f"Audio quá ngắn hoặc rỗng tại {audio_info.get('path')}. Đang chèn audio tĩnh để chống lỗi NaN.")
-                speech = np.zeros(self.config.sampling_rate, dtype=np.float32)
 
             filepath = audio_info.get("path") or item_hf.get("file", f"hf_audio_{idx}")
 
@@ -362,8 +352,10 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         elif "session" in ds.column_names:
             session_ids = ds["session"]
         else:
-            session_ids = [str(i % 5) for i in range(len(ds))]
-            logger.warning("No session column/filename found — using dummy session IDs.")
+            raise ValueError(
+                "Session metadata is required for speaker-independent "
+                "IEMOCAP evaluation. No session column or recognized filename pattern found."
+            )
 
         df = pd.DataFrame({"session_id": session_ids})
         gkf = GroupKFold(n_splits=5)

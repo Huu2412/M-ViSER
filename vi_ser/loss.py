@@ -56,10 +56,10 @@ class ViSERLoss(nn.Module):
         input_values: torch.Tensor,    # [B, T_audio] — for length computation
         acoustic_encoder,              # for get_feat_extract_output_lengths
         attention_mask: torch.Tensor = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, int]:
         """CTC loss — mirrors MTL-SER _ctc_loss exactly."""
         if ctc_labels is None:
-            return torch.tensor(0.0, device=logits_ctc.device)
+            return torch.tensor(0.0, device=logits_ctc.device), 0
 
         attention_mask = attention_mask if attention_mask is not None else torch.ones(
             input_values.shape[0], input_values.shape[1], dtype=torch.long, device=input_values.device
@@ -95,6 +95,10 @@ class ViSERLoss(nn.Module):
                 log_probs, flattened_targets, input_lengths, target_lengths,
                 blank=0, reduction="none", zero_infinity=self.ctc_zero_infinity,
             )
+            
+            # Identify samples where zero_infinity forced loss to 0.0 due to invalid alignment
+            invalid_ctc_count = int((loss_all == 0.0).sum().item())
+            
             loss_all = loss_all / target_lengths.clamp(min=1).float().to(loss_all.device)
 
             loss_all = torch.nan_to_num(loss_all, nan=0.0, posinf=0.0, neginf=0.0)
@@ -104,8 +108,8 @@ class ViSERLoss(nn.Module):
             loss = loss_all.sum() / denom
 
         if not torch.isfinite(loss):
-            return torch.tensor(0.0, device=logits_ctc.device)
-        return loss
+            return torch.tensor(0.0, device=logits_ctc.device), invalid_ctc_count
+        return loss, invalid_ctc_count
 
     def _kd_loss(
         self,
@@ -171,16 +175,18 @@ class ViSERLoss(nn.Module):
 
         # ── 2. Auxiliary: CTC Student ASR ────────────────────────────────────
         l_ctc = torch.tensor(0.0, device=device)
+        invalid_ctc = 0
         if (
             ctc_labels is not None
             and logits_ctc is not None
             and acoustic_encoder is not None
             and self.alpha_ctc > 0
         ):
-            l_ctc = self._ctc_loss(
+            l_ctc, invalid_ctc = self._ctc_loss(
                 logits_ctc, ctc_labels, input_values, acoustic_encoder, attention_mask
             )
         loss_dict["l_ctc"] = l_ctc.item()
+        loss_dict["invalid_ctc_samples"] = invalid_ctc
 
         # ── 3. Knowledge Distillation (KL) ───────────────────────────────────
         l_kd = torch.tensor(0.0, device=device)

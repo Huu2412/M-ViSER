@@ -17,15 +17,19 @@ from transformers import AutoModel, AutoFeatureExtractor
 logger = logging.getLogger(__name__)
 
 
-def _safe_normalize(tensor: torch.Tensor, name: str = "tensor") -> torch.Tensor:
-    """Replace NaN/Inf with zeros. Log a warning if any are found."""
+def _safe_normalize(tensor: torch.Tensor, name: str = "tensor", is_training: bool = False) -> torch.Tensor:
+    """Replace NaN/Inf with zeros. If training, raise RuntimeError instead."""
     if not torch.isfinite(tensor).all():
-        logger.warning(
+        msg = (
             f"NaN/Inf detected in {name} "
             f"(nan={tensor.isnan().sum().item()}, "
-            f"inf={tensor.isinf().sum().item()}). Replacing with zeros."
+            f"inf={tensor.isinf().sum().item()})."
         )
-        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        if is_training:
+            raise RuntimeError(msg + " Training should not continue with NaNs.")
+        else:
+            logger.warning(msg + " Replacing with zeros.")
+            tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
     return tensor
 
 
@@ -168,13 +172,13 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         hidden_states = outputs[0].float()  # cast to float32
 
         # ── Guard 2: sanitize hidden_states từ Wav2Vec2 ──────────────────────
-        hidden_states = _safe_normalize(hidden_states, "Wav2Vec2 hidden_states")
+        hidden_states = _safe_normalize(hidden_states, "Wav2Vec2 hidden_states", is_training=self.training)
 
         hidden_states = self.dropout(hidden_states)
 
         # CTC logits (Student ASR)
         logits_ctc = self.ctc_head(hidden_states)  # [B, T, V]
-        logits_ctc = _safe_normalize(logits_ctc, "logits_ctc")
+        logits_ctc = _safe_normalize(logits_ctc, "logits_ctc", is_training=self.training)
 
         # ── Mean pool over time → utterance embedding ────────────────────────
         if attention_mask is not None:
@@ -201,13 +205,13 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         # ── Guard 3: sanitize z_audio TRƯỚC audio_proj ──────────────────────
         # QUAN TRỌNG: SafeLayerNorm xử lý zero-variance bên trong audio_proj,
         # nhưng vẫn cần clean NaN/Inf có thể xuất hiện sau mean-pool.
-        z_audio = _safe_normalize(z_audio, "z_audio (pre-proj)")
+        z_audio = _safe_normalize(z_audio, "z_audio (pre-proj)", is_training=self.training)
 
         # ── Project to fusion_dim ────────────────────────────────────────────
         z_audio = self.audio_proj(z_audio)  # [B, fusion_dim]
 
         # ── Guard 4: final check sau audio_proj ─────────────────────────────
-        z_audio = _safe_normalize(z_audio, "z_audio (post-proj)")
+        z_audio = _safe_normalize(z_audio, "z_audio (post-proj)", is_training=self.training)
 
         return {
             "hidden_states": hidden_states,    # [B, T, H]

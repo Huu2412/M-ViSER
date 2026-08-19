@@ -189,7 +189,8 @@ def train(config):
     loss_fn = create_loss(config)
     optimizer = create_optimizer(model, config)
     
-    steps_per_epoch = max(1, len(train_loader) // config.gradient_accumulation_steps)
+    import math
+    steps_per_epoch = max(1, math.ceil(len(train_loader) / config.gradient_accumulation_steps))
     scheduler = create_scheduler(optimizer, config, steps_per_epoch=steps_per_epoch)
 
     # ── Compute FLOPs (using thop if available) ──────────────────────────────
@@ -228,6 +229,7 @@ def train(config):
         n_batches = 0
         train_emotion_correct = 0
         train_total = 0
+        total_invalid_ctc = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
@@ -296,6 +298,7 @@ def train(config):
             # Track losses & accuracy
             for k in epoch_losses:
                 epoch_losses[k] += loss_dict.get(k, 0.0)
+            total_invalid_ctc += loss_dict.get("invalid_ctc_samples", 0)
             n_batches += 1
             
             B = input_values.size(0)
@@ -310,11 +313,29 @@ def train(config):
                 "kd":   f"{loss_dict['l_kd']:.4f}",
             })
 
+        # ── Flush remaining gradients ─────────────────────────────────────
+        if len(train_loader) % config.gradient_accumulation_steps != 0:
+            grad_norm = nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=getattr(config, "grad_clip_norm", 1.0)
+            )
+            if not torch.isfinite(grad_norm):
+                logger.warning(f"NaN/Inf gradients detected at epoch end (norm={grad_norm})! Skipping final optimizer step.")
+            else:
+                optimizer.step()
+                if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step()
+            optimizer.zero_grad()
+
         # ── Epoch summary ─────────────────────────────────────────────────
         for k in epoch_losses:
             epoch_losses[k] /= max(n_batches, 1)
         
         train_emo_acc = train_emotion_correct / max(train_total, 1) * 100
+        
+        if train_total > 0 and total_invalid_ctc > 0:
+            invalid_ratio = total_invalid_ctc / train_total * 100
+            logger.warning(f"CTC invalid samples: {total_invalid_ctc}/{train_total} ({invalid_ratio:.2f}%)")
+            print(f"CTC invalid: total samples = {train_total}, invalid = {total_invalid_ctc}, ratio = {invalid_ratio:.2f}%")
         
         # ── Validation ────────────────────────────────────────────────────
         val_metrics = evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer)
