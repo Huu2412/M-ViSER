@@ -16,12 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 class SafeLayerNorm(nn.LayerNorm):
-    """LayerNorm với guard chống zero-variance để tránh NaN."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        std = x.std(dim=-1, keepdim=True)
-        if (std < 1e-6).any():
-            x = x + torch.randn_like(x) * 1e-6
-        return super().forward(x)
+    """
+    Fallback to standard nn.LayerNorm as PyTorch's eps already handles zero-variance.
+    Random noise injection was removed to ensure reproducibility.
+    """
+    pass
 
 
 class AudioGuidedGatedFusion(nn.Module):

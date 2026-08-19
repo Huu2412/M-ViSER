@@ -31,15 +31,10 @@ def _safe_normalize(tensor: torch.Tensor, name: str = "tensor") -> torch.Tensor:
 
 class SafeLayerNorm(nn.LayerNorm):
     """
-    LayerNorm với guard chống zero-variance (nguồn gốc NaN khi nhận all-zero input).
-    Thêm tiny noise nếu std < eps để tránh division by zero bên trong LayerNorm.
+    Fallback to standard nn.LayerNorm as PyTorch's eps already handles zero-variance.
+    Random noise injection was removed to ensure reproducibility.
     """
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Nếu std quá nhỏ (all-zero / all-constant), thêm tiny noise
-        std = x.std(dim=-1, keepdim=True)
-        if (std < 1e-6).any():
-            x = x + torch.randn_like(x) * 1e-6
-        return super().forward(x)
+    pass
 
 
 class Wav2Vec2AcousticEncoder(nn.Module):
@@ -200,6 +195,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             hidden_masked = hidden_states * mask.unsqueeze(-1)
             z_audio = hidden_masked.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)
         else:
+            mask = torch.ones(hidden_states.shape[:2], dtype=torch.bool, device=hidden_states.device)
             z_audio = hidden_states.mean(dim=1)  # [B, H]
 
         # ── Guard 3: sanitize z_audio TRƯỚC audio_proj ──────────────────────
@@ -215,6 +211,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
 
         return {
             "hidden_states": hidden_states,    # [B, T, H]
+            "audio_mask": mask,                # [B, T] (True=valid, False=padding)
             "z_audio": z_audio,                # [B, fusion_dim]
             "logits_ctc": logits_ctc,          # [B, T, vocab_size]
         }

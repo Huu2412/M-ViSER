@@ -1,6 +1,6 @@
 # M-ViSER (AURORA): Multimodal Speech Emotion Recognition
 
-M-ViSER is a state-of-the-art multimodal speech emotion recognition (SER) system featuring the robust AURORA fusion architecture. It natively supports both standard English benchmarking on IEMOCAP and is extensible to other languages like Vietnamese.
+M-ViSER is a state-of-the-art multimodal speech emotion recognition (SER) system featuring the robust AURORA fusion architecture. It natively supports standard English benchmarking on IEMOCAP.
 
 ## 🚀 Key Features
 
@@ -21,8 +21,6 @@ The project is organized following standard Python Package structure conventions
 ViSER/
 ├── config/
 │   └── config.yaml          # Hyperparameters configuration file
-├── scripts/
-│   └── precache_teacher.py  # Script to pre-cache PhoWhisper ASR texts
 ├── vi_ser/                  # Core package containing the algorithm
 │   ├── data_loader/         # DataLoader and Dataset processing
 │   ├── encoders/            # Feature extraction modules (Acoustic, Text)
@@ -54,11 +52,6 @@ pip install -r requirements.txt
 
 ### 1. Data Preparation
 Ensure you have the CSV files containing the dataset metadata. The paths to these files are configured in `config/config.yaml` (e.g., `train_csv`, `val_csv`, `test_csv`). The CSV format should include columns for: audio file path, emotion label, and regional label.
-
-**Recommendation:** Before training, run the precaching script to extract clean transcripts using PhoWhisper. This speeds up the main training loop significantly:
-```bash
-python scripts/precache_teacher.py --config config/config.yaml --batch_size 8
-```
 
 ### 2. Training
 Run the `train.py` script to start training. The model will automatically load configurations from `config/config.yaml`.

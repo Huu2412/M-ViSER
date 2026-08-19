@@ -56,7 +56,7 @@ class EmotionClassifier(MLPClassifier):
 class TeacherEmotionHead(MLPClassifier):
     """
     Teacher path emotion head.
-    Applied to z_teacher_rep (from PhoWhisper+audio fusion via clean text).
+    Applied to z_teacher_rep (from Ground-Truth text + audio fusion).
     Used only during training for KD — gradients from KD loss flow through
     the student, NOT through this head (teacher is frozen).
     """

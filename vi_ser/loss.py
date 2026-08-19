@@ -17,7 +17,7 @@ from typing import Dict, Optional, Tuple
 
 class ViSERLoss(nn.Module):
     """
-    Combined loss for Vietnamese Speech Emotion Recognition.
+    Combined loss for Multimodal Speech Emotion Recognition.
 
     Combines:
       1. Emotion CE (primary)

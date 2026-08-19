@@ -104,6 +104,5 @@ class UncertaintyGate(nn.Module):
         """
         x = torch.cat([z_audio, z_asr], dim=-1)   # [B, audio_dim + text_dim]
         alpha_raw = self.net(x)                    # [B, 1]
-        alpha = torch.sigmoid(alpha_raw)
-        alpha = alpha.clamp(self.alpha_min, self.alpha_max)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(alpha_raw)
         return alpha

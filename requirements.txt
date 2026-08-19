@@ -14,5 +14,5 @@ PyYAML>=6.0
 # Optional: WandB for experiment tracking
 # wandb>=0.16.0
 
-# For Vietnamese PhoBERT and PhoWhisper
+# Core dependencies
 sentencepiece>=0.1.99

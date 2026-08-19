@@ -77,10 +77,10 @@ class SERModel(nn.Module):
         self.text_encoder = BERTTextEncoder(config)
 
         # ── Shared Fusion Modules (AURORA-style) ─────────────────────────────
-        # CrossModal: both inputs already at fusion_dim (projected by encoders)
+        # CrossModal: project text and audio sequences and apply bidirectional cross-attention
         self.shared_cross_modal = CrossModalEncoders(
-            audio_input_dim=config.fusion_dim,
-            text_input_dim=config.fusion_dim,
+            audio_input_dim=config.acoustic_hidden_size,
+            text_input_dim=config.text_hidden_size,
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
             num_heads=config.num_heads,
@@ -111,7 +111,8 @@ class SERModel(nn.Module):
 
     def _student_forward(
         self,
-        z_audio: torch.Tensor,       # [B, fusion_dim]
+        audio_hidden: torch.Tensor,  # [B, T_a, audio_hidden_size]
+        audio_mask: torch.Tensor,    # [B, T_a]
         student_texts: List[str],    # CTC-decoded text
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -123,10 +124,14 @@ class SERModel(nn.Module):
             alpha:      [B, 1]
         """
         # Encode student CTC text with BERT
-        z_asr_student = self.text_encoder(student_texts, device=z_audio.device)
+        text_out = self.text_encoder(student_texts, device=audio_hidden.device)
+        text_hidden = text_out["hidden_states"]
+        text_mask = text_out["attention_mask"]
 
         # Cross-modal alignment
-        z_audio_enc, z_text_enc = self.shared_cross_modal(z_audio, z_asr_student)
+        z_audio_enc, z_text_enc = self.shared_cross_modal(
+            audio_hidden, audio_mask, text_hidden, text_mask
+        )
 
         # Repair noisy CTC text embedding using audio guidance
         z_repaired = self.repair_mlp(z_audio_enc, z_text_enc)
@@ -141,7 +146,8 @@ class SERModel(nn.Module):
 
     def _teacher_forward(
         self,
-        z_audio: torch.Tensor,       # [B, fusion_dim]
+        audio_hidden: torch.Tensor,  # [B, T_a, audio_hidden_size]
+        audio_mask: torch.Tensor,    # [B, T_a]
         teacher_texts: List[str],    # Ground-truth transcripts (clean)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -152,11 +158,16 @@ class SERModel(nn.Module):
             z_teacher_rep:         [B, fusion_dim]
             logits_emotion_teacher: [B, num_emotion_classes]
         """
-        z_clean_text = self.text_encoder(teacher_texts, device=z_audio.device)
-        z_audio_enc, z_text_enc = self.shared_cross_modal(z_audio, z_clean_text)
+        text_out = self.text_encoder(teacher_texts, device=audio_hidden.device)
+        text_hidden = text_out["hidden_states"]
+        text_mask = text_out["attention_mask"]
+        
+        z_audio_enc, z_text_enc = self.shared_cross_modal(
+            audio_hidden, audio_mask, text_hidden, text_mask
+        )
 
         # Teacher uses full alpha=1.0 (clean text → maximum confidence)
-        alpha_ones = torch.ones(z_audio.size(0), 1, device=z_audio.device)
+        alpha_ones = torch.ones(audio_hidden.size(0), 1, device=audio_hidden.device)
         z_teacher_rep = self.shared_gmu(z_audio_enc, z_text_enc, alpha_ones)
 
         logits_emotion_teacher = self.teacher_emotion_classifier(z_teacher_rep)
@@ -208,6 +219,7 @@ class SERModel(nn.Module):
             attention_mask=attention_mask,
         )
         hidden_states = acoustic_out["hidden_states"]  # [B, T, H]
+        audio_mask    = acoustic_out["audio_mask"]     # [B, T]
         z_audio       = acoustic_out["z_audio"]        # [B, fusion_dim]
         logits_ctc    = acoustic_out["logits_ctc"]     # [B, T, V]
 
@@ -221,7 +233,7 @@ class SERModel(nn.Module):
                 student_texts = [""] * input_values.size(0)
 
         # ── Step 3: Student Path (AURORA Repair + GMU) ───────────────────────
-        z_fused, z_repaired, alpha = self._student_forward(z_audio, student_texts)
+        z_fused, z_repaired, alpha = self._student_forward(hidden_states, audio_mask, student_texts)
 
         # ── Step 4: Emotion Classification ───────────────────────────────────
         logits_emotion_student = self.emotion_classifier(z_fused)    # [B, num_emo]
@@ -241,7 +253,7 @@ class SERModel(nn.Module):
         # ── Step 5: Teacher Path (training only) ─────────────────────────────
         if training_mode and teacher_texts is not None:
             z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
-                z_audio, teacher_texts
+                hidden_states, audio_mask, teacher_texts
             )
             output["z_teacher_rep"]          = z_teacher_rep
             output["logits_emotion_teacher"] = logits_emotion_teacher

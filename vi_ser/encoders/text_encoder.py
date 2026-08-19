@@ -17,14 +17,10 @@ logger = logging.getLogger(__name__)
 
 class SafeLayerNorm(nn.LayerNorm):
     """
-    LayerNorm với guard chống zero-variance.
-    Khi BERT encode chuỗi rỗng "", CLS embedding có thể gần all-zero → NaN trong LayerNorm.
+    Fallback to standard nn.LayerNorm as PyTorch's eps already handles zero-variance.
+    Random noise injection was removed to ensure reproducibility.
     """
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        std = x.std(dim=-1, keepdim=True)
-        if (std < 1e-6).any():
-            x = x + torch.randn_like(x) * 1e-6
-        return super().forward(x)
+    pass
 
 
 class BERTTextEncoder(nn.Module):
@@ -51,14 +47,7 @@ class BERTTextEncoder(nn.Module):
             for param in self.bert.parameters():
                 param.requires_grad = False
 
-        # Project BERT [CLS] dim → fusion_dim
-        # Dùng SafeLayerNorm để tránh NaN khi text rỗng → CLS all-zero
-        self.proj = nn.Sequential(
-            nn.Linear(config.text_hidden_size, config.fusion_dim),
-            nn.GELU(),
-            SafeLayerNorm(config.fusion_dim),
-            nn.Dropout(config.dropout),
-        )
+        # Removed projection to fusion_dim; it will be done in CrossModalEncoders
 
     def forward(
         self,
@@ -73,7 +62,9 @@ class BERTTextEncoder(nn.Module):
             device: Target device
 
         Returns:
-            z_text: [B, fusion_dim]
+            dict containing:
+                "hidden_states": [B, T_text, text_hidden_size]
+                "attention_mask": [B, T_text] (Boolean: True for valid, False for padding)
         """
         if device is None:
             device = next(self.parameters()).device
@@ -92,26 +83,21 @@ class BERTTextEncoder(nn.Module):
         encoding = {k: v.to(device) for k, v in encoding.items()}
 
         outputs = self.bert(**encoding)
-        # Use [CLS] token embedding as sentence representation
-        cls_emb = outputs.last_hidden_state[:, 0, :].float()  # [B, text_hidden_size]
+        # Full sequence hidden states
+        hidden_states = outputs.last_hidden_state  # [B, T_text, text_hidden_size]
+        attention_mask = encoding["attention_mask"].bool()  # [B, T_text]
 
         # Guard: NaN có thể xuất hiện từ BERT nếu input ids sai
-        if not torch.isfinite(cls_emb).all():
+        if not torch.isfinite(hidden_states).all():
             logger.warning(
-                "NaN/Inf detected in BERT CLS embedding. Replacing with zeros."
+                "NaN/Inf detected in BERT hidden_states. Replacing with zeros."
             )
-            cls_emb = torch.nan_to_num(cls_emb, nan=0.0, posinf=0.0, neginf=0.0)
+            hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=0.0, neginf=0.0)
 
-        z_text = self.proj(cls_emb)  # [B, fusion_dim]
-
-        # Final guard
-        if not torch.isfinite(z_text).all():
-            logger.warning(
-                "NaN/Inf detected in z_text after projection. Replacing with zeros."
-            )
-            z_text = torch.nan_to_num(z_text, nan=0.0, posinf=0.0, neginf=0.0)
-
-        return z_text
+        return {
+            "hidden_states": hidden_states,
+            "attention_mask": attention_mask
+        }
 
     def forward_from_token_ids(
         self,
@@ -122,11 +108,16 @@ class BERTTextEncoder(nn.Module):
         Encode from pre-tokenized inputs (for batched pre-processing).
 
         Returns:
-            z_text: [B, fusion_dim]
+            dict containing:
+                "hidden_states": [B, T_text, text_hidden_size]
+                "attention_mask": [B, T_text]
         """
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        cls_emb = outputs.last_hidden_state[:, 0, :].float()
-        return self.proj(cls_emb)
+        hidden_states = outputs.last_hidden_state.float()
+        return {
+            "hidden_states": hidden_states,
+            "attention_mask": attention_mask.bool()
+        }
 
 
 class NullTextEncoder(nn.Module):
@@ -135,11 +126,17 @@ class NullTextEncoder(nn.Module):
     Used when no text is available (audio-only inference mode).
     """
 
-    def __init__(self, fusion_dim: int):
+    def __init__(self, config):
         super().__init__()
-        self.fusion_dim = fusion_dim
+        self.text_hidden_size = config.text_hidden_size
 
-    def forward(self, texts: List[str], device=None) -> torch.Tensor:
+    def forward(self, texts: List[str], device=None) -> dict:
         B = len(texts)
         dev = device or torch.device("cpu")
-        return torch.zeros(B, self.fusion_dim, device=dev)
+        # Dummy sequence of length 1
+        hidden_states = torch.zeros(B, 1, self.text_hidden_size, device=dev)
+        attention_mask = torch.ones(B, 1, dtype=torch.bool, device=dev)
+        return {
+            "hidden_states": hidden_states,
+            "attention_mask": attention_mask
+        }

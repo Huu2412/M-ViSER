@@ -1,5 +1,5 @@
 """
-utils.py — Utility functions for ViSER (Vietnamese Speech Emotion Recognition).
+utils.py — Utility functions for M-ViSER (Multimodal Speech Emotion Recognition).
 
 Provides:
   - set_seed            : reproducibility

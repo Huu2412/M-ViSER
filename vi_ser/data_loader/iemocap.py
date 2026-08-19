@@ -43,7 +43,6 @@ class ViSERDataset(Dataset):
         feature_extractor,          # Wav2Vec2 AutoFeatureExtractor
         ctc_tokenizer,              # Wav2Vec2CTCTokenizer (English)
         teacher_cache=None,         # Unused — kept for API compatibility
-        phowhisper_teacher=None,    # Unused — removed (was Vietnamese only)
         is_training: bool = True,
         audio_only: bool = False,   # Inference mode: no text labels
         hf_dataset=None,            # Hugging Face Dataset subset
@@ -52,7 +51,6 @@ class ViSERDataset(Dataset):
         self.feature_extractor = feature_extractor
         self.ctc_tokenizer = ctc_tokenizer
         self.teacher_cache = teacher_cache
-        self.phowhisper_teacher = phowhisper_teacher
         self.is_training = is_training
         self.audio_only = audio_only
         self.hf_dataset = hf_dataset
@@ -209,8 +207,8 @@ class ViSERDataset(Dataset):
             
         # --- Unified Guard cho cả 2 nhánh tải audio ---
         if not np.isfinite(speech).all() or len(speech) < 400:
-            logger.warning(f"Audio hỏng/quá ngắn tại {filepath}. Chèn nhiễu để chống lỗi.")
-            speech = np.random.randn(self.config.sampling_rate).astype(np.float32) * 1e-6
+            logger.warning(f"Audio hỏng/quá ngắn tại {filepath}. Chèn zero padding để chống lỗi.")
+            speech = np.zeros(self.config.sampling_rate, dtype=np.float32)
             sr = self.config.sampling_rate
             
         if sr != self.config.sampling_rate:
@@ -224,18 +222,16 @@ class ViSERDataset(Dataset):
         max_len = int(self.config.max_audio_length_sec * self.config.sampling_rate)
         speech = speech[:max_len]
 
-        # ── Normalize audio ─────────────────────────────────────────────────
-        # Wav2Vec2 kỳ vọng waveform ~[-1, 1]. Nếu amplitude quá lớn hoặc có
-        # NaN/Inf (từ augmentation hoặc file hỏng) → Wav2Vec2 sẽ sinh NaN hidden states.
+        # ── Sanitize audio ─────────────────────────────────────────────────
+        # Nếu có NaN/Inf (từ augmentation hoặc file hỏng) → Wav2Vec2 sẽ sinh NaN hidden states.
         speech = np.nan_to_num(speech, nan=0.0, posinf=1.0, neginf=-1.0)
-        max_abs = np.abs(speech).max()
-        if max_abs > 1e-6:  # tránh chia cho 0 với audio im lặng
-            speech = speech / max_abs  # peak normalize về [-1, 1]
-        else:
-            # Audio im lặng hoàn toàn: thêm tiny noise để tránh all-zero tensor
-            speech = np.random.randn(len(speech)).astype(np.float32) * 1e-6
+        
+        # NOTE: Peak normalization (speech / max_abs) and random noise injection 
+        # were removed to preserve energy/amplitude information useful for emotion 
+        # recognition, and to ensure reproducibility. Wav2Vec2 feature extractor 
+        # handles standard normalization natively.
 
-        # ── Feature extraction (ViP-VL processor) ──────────────────────────
+        # ── Feature extraction ───────────────────────────────────────────────
         inputs = self.feature_extractor(
             speech,
             sampling_rate=self.config.sampling_rate,
@@ -256,7 +252,7 @@ class ViSERDataset(Dataset):
             )
 
 
-            # ── Teacher text (PhoWhisper transcription) ────────────────────
+            # ── Teacher text (Ground Truth transcription) ────────────────────
             if self.is_training:
                 teacher_text = self._get_teacher_text(filepath, speech)
                 item["teacher_text"] = teacher_text if teacher_text else clean_text
@@ -329,7 +325,7 @@ class ViSERCollator:
         return batch
 
 
-def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=None, phowhisper_teacher=None):
+def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=None):
     """Build train/val/test DataLoaders."""
     
     if getattr(config, "hf_dataset", None):
@@ -382,23 +378,23 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         
         train_ds = ViSERDataset(
             csv_path=None, config=config, feature_extractor=feature_extractor, ctc_tokenizer=ctc_tokenizer,
-            teacher_cache=teacher_cache, phowhisper_teacher=phowhisper_teacher, is_training=True,
+            teacher_cache=teacher_cache, is_training=True,
             hf_dataset=train_hf_ds
         )
         val_ds = ViSERDataset(
             csv_path=None, config=config, feature_extractor=feature_extractor, ctc_tokenizer=ctc_tokenizer,
-            teacher_cache=teacher_cache, phowhisper_teacher=phowhisper_teacher, is_training=False,
+            teacher_cache=teacher_cache, is_training=False,
             hf_dataset=val_hf_ds
         )
     else:
         train_ds = ViSERDataset(
             config.train_csv, config, feature_extractor, ctc_tokenizer,
-            teacher_cache=teacher_cache, phowhisper_teacher=phowhisper_teacher,
+            teacher_cache=teacher_cache,
             is_training=True,
         )
         val_ds = ViSERDataset(
             config.val_csv, config, feature_extractor, ctc_tokenizer,
-            teacher_cache=teacher_cache, phowhisper_teacher=phowhisper_teacher,
+            teacher_cache=teacher_cache,
             is_training=False,
         )
 

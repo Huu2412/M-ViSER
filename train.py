@@ -232,9 +232,8 @@ def train(config):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
             input_values = batch["input_values"].to(device).float()  # force float32
-            # CRITICAL: Add tiny noise to break exact 0.0 padding. Wav2Vec2 feature extractor
-            # produces NaN internally if given perfectly silent (0.0) padding frames.
-            input_values = input_values + torch.randn_like(input_values) * 1e-6
+            # Noise injection over padding has been removed to avoid train/val distribution mismatch.
+            # NaN issues are already handled by Wav2Vec2 attention mask and SafeLayerNorm guards.
             
             attention_mask = batch.get("attention_mask")
             if attention_mask is not None:

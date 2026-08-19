@@ -1,4 +1,4 @@
-# ViSER: Vietnamese Speech Emotion Recognition
+# M-ViSER: Multimodal Speech Emotion Recognition
 # Combines MTL-SER (CTC student) + AURORA (Audio-Guided Repair Fusion)
-# Backbone: ViP-VL | Teacher ASR: PhoWhisper | Text: PhoBERT
-# Tasks: Emotion (primary) + CTC ASR + Regional Recognition (auxiliary)
+# Backbone: Wav2Vec2 | Teacher ASR: Ground Truth | Text: BERT
+# Tasks: Emotion (primary) + CTC ASR

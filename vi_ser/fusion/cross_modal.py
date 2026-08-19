@@ -14,12 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class SafeLayerNorm(nn.LayerNorm):
-    """LayerNorm với guard chống zero-variance để tránh NaN."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        std = x.std(dim=-1, keepdim=True)
-        if (std < 1e-6).any():
-            x = x + torch.randn_like(x) * 1e-6
-        return super().forward(x)
+    """
+    Fallback to standard nn.LayerNorm as PyTorch's eps already handles zero-variance.
+    Random noise injection was removed to ensure reproducibility.
+    """
+    pass
 
 
 class CrossModalEncoders(nn.Module):
@@ -75,27 +74,42 @@ class CrossModalEncoders(nn.Module):
 
     def forward(
         self,
-        z_audio: torch.Tensor,  # [B, audio_input_dim]
-        z_text: torch.Tensor,   # [B, text_input_dim]
+        z_audio: torch.Tensor,       # [B, T_a, audio_input_dim]
+        audio_mask: torch.Tensor,    # [B, T_a] (Boolean: True=valid, False=padding)
+        z_text: torch.Tensor,        # [B, T_t, text_input_dim]
+        text_mask: torch.Tensor,     # [B, T_t] (Boolean: True=valid, False=padding)
     ):
         # Project inputs to fusion_dim
-        z_a = self.audio_proj(z_audio)   # [B, fusion_dim]
-        z_t = self.text_proj(z_text)     # [B, fusion_dim]
+        z_a_seq = self.audio_proj(z_audio)   # [B, T_a, fusion_dim]
+        z_t_seq = self.text_proj(z_text)     # [B, T_t, fusion_dim]
 
-        # Reshape to sequence length of 1 for MultiheadAttention
-        # [B, 1, fusion_dim]
-        z_a_seq = z_a.unsqueeze(1)
-        z_t_seq = z_t.unsqueeze(1)
+        # Invert masks for nn.MultiheadAttention (True means ignore/pad)
+        audio_pad_mask = ~audio_mask  # [B, T_a]
+        text_pad_mask = ~text_mask    # [B, T_t]
 
-        # Cross-Attention: Audio attends to Text
-        attn_a, _ = self.audio_cross_attn(query=z_a_seq, key=z_t_seq, value=z_t_seq)
+        # Cross-Attention: Audio attends to Text (Query=Audio, Key/Value=Text)
+        attn_a, _ = self.audio_cross_attn(
+            query=z_a_seq, key=z_t_seq, value=z_t_seq,
+            key_padding_mask=text_pad_mask
+        )
         
-        # Cross-Attention: Text attends to Audio
-        attn_t, _ = self.text_cross_attn(query=z_t_seq, key=z_a_seq, value=z_a_seq)
+        # Cross-Attention: Text attends to Audio (Query=Text, Key/Value=Audio)
+        attn_t, _ = self.text_cross_attn(
+            query=z_t_seq, key=z_a_seq, value=z_a_seq,
+            key_padding_mask=audio_pad_mask
+        )
 
         # Residual connection and LayerNorm
-        z_audio_enc = self.audio_norm(z_a_seq + attn_a).squeeze(1)  # [B, fusion_dim]
-        z_text_enc = self.text_norm(z_t_seq + attn_t).squeeze(1)    # [B, fusion_dim]
+        z_audio_enc_seq = self.audio_norm(z_a_seq + attn_a)  # [B, T_a, fusion_dim]
+        z_text_enc_seq = self.text_norm(z_t_seq + attn_t)    # [B, T_t, fusion_dim]
+
+        # Pooling back to [B, fusion_dim]
+        # Audio: Masked Mean Pooling
+        audio_masked = z_audio_enc_seq * audio_mask.unsqueeze(-1).float()
+        z_audio_enc = audio_masked.sum(dim=1) / audio_mask.sum(dim=1, keepdim=True).clamp(min=1).float()
+        
+        # Text: CLS Token extraction (BERT puts [CLS] at index 0)
+        z_text_enc = z_text_enc_seq[:, 0, :]
 
         # Guard sau cross-modal projection
         if not torch.isfinite(z_audio_enc).all():
