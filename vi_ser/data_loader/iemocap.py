@@ -88,6 +88,8 @@ class ViSERDataset(Dataset):
         """Apply waveform augmentations (Pitch Shift, Noise Injection, Time Stretch)."""
         if not self.is_training or np.random.rand() > self.config.augment_prob:
             return speech
+            
+        original_speech = speech.copy()
         
         weights = [
             self.config.augment_pitch_weight,
@@ -101,18 +103,26 @@ class ViSERDataset(Dataset):
         
         aug_choice = np.random.choice(["pitch", "noise", "time"], p=weights)
         
-        if aug_choice == "pitch":
-            n_steps = np.random.uniform(*self.config.augment_pitch_steps)
-            speech = librosa.effects.pitch_shift(speech, sr=sr, n_steps=n_steps)
+        try:
+            if aug_choice == "pitch":
+                n_steps = np.random.uniform(*self.config.augment_pitch_steps)
+                speech = librosa.effects.pitch_shift(speech, sr=sr, n_steps=n_steps)
+                
+            elif aug_choice == "noise":
+                noise_factor = np.random.uniform(*self.config.augment_noise_range)
+                noise = np.random.randn(len(speech))
+                speech = speech + noise_factor * noise
+                
+            elif aug_choice == "time":
+                rate = np.random.uniform(*self.config.augment_time_range)
+                speech = librosa.effects.time_stretch(speech, rate=rate)
+        except Exception as e:
+            logger.warning(f"Augmentation {aug_choice} failed: {e}. Fallback to original.")
+            return original_speech
             
-        elif aug_choice == "noise":
-            noise_factor = np.random.uniform(*self.config.augment_noise_range)
-            noise = np.random.randn(len(speech))
-            speech = speech + noise_factor * noise
-            
-        elif aug_choice == "time":
-            rate = np.random.uniform(*self.config.augment_time_range)
-            speech = librosa.effects.time_stretch(speech, rate=rate)
+        # Guard: Nếu augment sinh ra NaNs hoặc làm audio quá ngắn, quay lại bản gốc
+        if not np.isfinite(speech).all() or len(speech) < 400:
+            return original_speech
             
         return speech
 
@@ -199,6 +209,12 @@ class ViSERDataset(Dataset):
             
             emotion_str = str(row[self.config.emotion_col])
             clean_text = str(row.get(self.config.text_col, ""))
+            
+        # --- Unified Guard cho cả 2 nhánh tải audio ---
+        if not np.isfinite(speech).all() or len(speech) < 400:
+            logger.warning(f"Audio hỏng/quá ngắn tại {filepath}. Chèn nhiễu để chống lỗi.")
+            speech = np.random.randn(self.config.sampling_rate).astype(np.float32) * 1e-6
+            sr = self.config.sampling_rate
             
         if sr != self.config.sampling_rate:
             speech = librosa.resample(speech, orig_sr=sr, target_sr=self.config.sampling_rate)
