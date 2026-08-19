@@ -61,66 +61,48 @@ class ViSERLoss(nn.Module):
         if ctc_labels is None:
             return torch.tensor(0.0, device=logits_ctc.device)
 
-        attention_mask = (
-            attention_mask
-            if attention_mask is not None
-            else torch.ones(
-                input_values.shape[0], input_values.shape[1],
-                dtype=torch.long,
-                device=input_values.device,
-            )
+        attention_mask = attention_mask if attention_mask is not None else torch.ones(
+            input_values.shape[0], input_values.shape[1], dtype=torch.long, device=input_values.device
         )
         max_input_len = input_values.shape[1]
         max_output_len = logits_ctc.shape[1]
         input_lengths = acoustic_encoder.get_feat_extract_output_lengths(
             attention_mask.sum(-1), max_input_len, max_output_len
         )
+        input_lengths = input_lengths.clamp(min=1)
 
         labels_mask = ctc_labels >= 0
         target_lengths = labels_mask.sum(-1)
 
-        # ── Guard: skip samples where input_len < target_len (CTC requirement) ──
         valid_mask = input_lengths >= target_lengths
         if not valid_mask.all():
             import logging
             logging.getLogger(__name__).warning(
                 f"CTC: {(~valid_mask).sum().item()} samples bị loại do input_length < target_length."
             )
-            # Sửa lại ctc_labels của các sample lỗi để vượt qua vòng kiểm tra của F.ctc_loss
-            # (chúng ta sẽ xoá loss của chúng đi sau)
             ctc_labels = ctc_labels.clone()
             ctc_labels[~valid_mask] = -100
-            ctc_labels[~valid_mask, 0] = 0  # dummy token
-            
-            # Tính lại
+            ctc_labels[~valid_mask, 0] = 1
             labels_mask = ctc_labels >= 0
             target_lengths = labels_mask.sum(-1)
 
         flattened_targets = ctc_labels.masked_select(labels_mask)
-
-        # Clamp log_probs để tránh -inf
         log_probs = F.log_softmax(logits_ctc.float(), dim=-1).transpose(0, 1)
         log_probs = log_probs.clamp(min=-100.0)
 
         with torch.backends.cudnn.flags(enabled=False):
             loss_all = F.ctc_loss(
-                log_probs,
-                flattened_targets,
-                input_lengths,
-                target_lengths,
-                blank=0,  # pad_token_id
-                reduction="none",
-                zero_infinity=self.ctc_zero_infinity,
+                log_probs, flattened_targets, input_lengths, target_lengths,
+                blank=0, reduction="none", zero_infinity=self.ctc_zero_infinity,
             )
-            
-            # Chia cho target_lengths để chuẩn hoá (giống hệt reduction='mean' mặc định của PyTorch)
-            # Dùng clamp(min=1) để tránh chia cho 0 với những sample bị lỗi
             loss_all = loss_all / target_lengths.clamp(min=1).float().to(loss_all.device)
-            
-            # Chỉ lấy loss của các sample hợp lệ và tính trung bình qua batch
-            loss = (loss_all * valid_mask.float().to(loss_all.device)).sum() / (valid_mask.sum().float().to(loss_all.device) + 1e-8)
 
-        # Final guard: nếu vẫn NaN/Inf thì trả 0
+            loss_all = torch.nan_to_num(loss_all, nan=0.0, posinf=0.0, neginf=0.0)
+            loss_all = torch.where(valid_mask.to(loss_all.device), loss_all, torch.zeros_like(loss_all))
+
+            denom = valid_mask.sum().float().clamp(min=1).to(loss_all.device)
+            loss = loss_all.sum() / denom
+
         if not torch.isfinite(loss):
             return torch.tensor(0.0, device=logits_ctc.device)
         return loss
