@@ -83,6 +83,7 @@ class SERModel(nn.Module):
             text_input_dim=config.fusion_dim,
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
+            num_heads=config.num_heads,
         )
         self.repair_mlp = RepairMLP(
             audio_dim=config.fusion_dim,

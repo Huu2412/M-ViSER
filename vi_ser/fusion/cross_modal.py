@@ -24,8 +24,7 @@ class SafeLayerNorm(nn.LayerNorm):
 
 class CrossModalEncoders(nn.Module):
     """
-    Dual linear encoders that project audio and text embeddings
-    into the same fusion_dim space for cross-modal interaction.
+    Bidirectional Multi-Head Cross-Attention for Audio-Text Fusion (AURORA).
 
     Input:
         z_audio: [B, audio_dim]  (from Wav2Vec2 audio_proj)
@@ -42,30 +41,61 @@ class CrossModalEncoders(nn.Module):
         text_input_dim: int,
         fusion_dim: int,
         dropout: float = 0.1,
+        num_heads: int = 8,
     ):
         super().__init__()
 
-        self.audio_encoder = nn.Sequential(
+        # 1. Linear projections to shared space
+        self.audio_proj = nn.Sequential(
             nn.Linear(audio_input_dim, fusion_dim),
             nn.GELU(),
             SafeLayerNorm(fusion_dim),
             nn.Dropout(dropout),
         )
 
-        self.text_encoder = nn.Sequential(
+        self.text_proj = nn.Sequential(
             nn.Linear(text_input_dim, fusion_dim),
             nn.GELU(),
             SafeLayerNorm(fusion_dim),
             nn.Dropout(dropout),
         )
 
+        # 2. Bidirectional Cross-Attention
+        # Audio attends to Text (Query=Audio, Key/Value=Text)
+        self.audio_cross_attn = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.audio_norm = SafeLayerNorm(fusion_dim)
+        
+        # Text attends to Audio (Query=Text, Key/Value=Audio)
+        self.text_cross_attn = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.text_norm = SafeLayerNorm(fusion_dim)
+
     def forward(
         self,
         z_audio: torch.Tensor,  # [B, audio_input_dim]
         z_text: torch.Tensor,   # [B, text_input_dim]
     ):
-        z_audio_enc = self.audio_encoder(z_audio)   # [B, fusion_dim]
-        z_text_enc = self.text_encoder(z_text)      # [B, fusion_dim]
+        # Project inputs to fusion_dim
+        z_a = self.audio_proj(z_audio)   # [B, fusion_dim]
+        z_t = self.text_proj(z_text)     # [B, fusion_dim]
+
+        # Reshape to sequence length of 1 for MultiheadAttention
+        # [B, 1, fusion_dim]
+        z_a_seq = z_a.unsqueeze(1)
+        z_t_seq = z_t.unsqueeze(1)
+
+        # Cross-Attention: Audio attends to Text
+        attn_a, _ = self.audio_cross_attn(query=z_a_seq, key=z_t_seq, value=z_t_seq)
+        
+        # Cross-Attention: Text attends to Audio
+        attn_t, _ = self.text_cross_attn(query=z_t_seq, key=z_a_seq, value=z_a_seq)
+
+        # Residual connection and LayerNorm
+        z_audio_enc = self.audio_norm(z_a_seq + attn_a).squeeze(1)  # [B, fusion_dim]
+        z_text_enc = self.text_norm(z_t_seq + attn_t).squeeze(1)    # [B, fusion_dim]
 
         # Guard sau cross-modal projection
         if not torch.isfinite(z_audio_enc).all():

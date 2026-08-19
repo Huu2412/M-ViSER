@@ -134,9 +134,6 @@ class ViSERDataset(Dataset):
         "angry":      "ang",
         "frustrated": "ang",   # frustrated → angry
         "sad":        "sad",
-        "disgust":    "ang",
-        "fear":       "sad",
-        "surprise":   "hap",
     }
 
     def __getitem__(self, idx: int) -> Dict:
@@ -344,30 +341,37 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         logger.info(f"Loading HF dataset {config.hf_dataset} ...")
         ds = datasets.load_dataset(config.hf_dataset, split="train")
 
+        # ── Lọc bỏ các nhãn ngoài 4 lớp chuẩn của IEMOCAP (neutral, happy, excited, angry, frustrated, sad) ──
+        allowed_emotions = {"neutral", "happy", "excited", "angry", "frustrated", "sad", "neu", "hap", "ang"}
+        emo_col = "emotion" if "emotion" in ds.column_names else "major_emotion" if "major_emotion" in ds.column_names else None
+        if emo_col:
+            orig_len = len(ds)
+            ds = ds.filter(lambda x: str(x[emo_col]).lower().strip() in allowed_emotions)
+            logger.info(f"Filtered out {orig_len - len(ds)} samples with non-standard emotions. Remaining: {len(ds)} samples.")
+
         # Cast audio column về decode=False (raw bytes) — hỗ trợ cả 'audio' và 'path'
         audio_col = "audio" if "audio" in ds.column_names else "path"
         ds = ds.cast_column(audio_col, datasets.Audio(decode=False))
 
-        # ── Xác định speaker_id để split speaker-independent ────────────────
-        if "speaker_id" in ds.column_names:
-            speaker_ids = ds["speaker_id"]
-        elif "speaker" in ds.column_names:
-            speaker_ids = ds["speaker"]
+        # ── Xác định session_id để split session-independent (LOSO-5-fold) ──
+        file_col = "file" if "file" in ds.column_names else None
+        if file_col:
+            # AbstractTTS/IEMOCAP: extract session từ filename  Ses01F_impro01_F000 → '01'
+            def extract_session(fname):
+                m = re.match(r"Ses(\d+)", str(fname))
+                return m.group(1) if m else str(fname)[:2]
+            session_ids = [extract_session(f) for f in ds[file_col]]
+        elif "session_id" in ds.column_names:
+            session_ids = ds["session_id"]
+        elif "session" in ds.column_names:
+            session_ids = ds["session"]
         else:
-            # AbstractTTS/IEMOCAP: extract speaker từ filename  Ses01F_impro01_F000 → '1F'
-            file_col = "file" if "file" in ds.column_names else None
-            if file_col:
-                def extract_speaker(fname):
-                    m = re.match(r"Ses(\d+[MF])", str(fname))
-                    return m.group(1) if m else str(fname)[:4]
-                speaker_ids = [extract_speaker(f) for f in ds[file_col]]
-            else:
-                speaker_ids = [str(i % 10) for i in range(len(ds))]
-                logger.warning("No speaker column found — using dummy speaker IDs.")
+            session_ids = [str(i % 5) for i in range(len(ds))]
+            logger.warning("No session column/filename found — using dummy session IDs.")
 
-        df = pd.DataFrame({"speaker_id": speaker_ids})
+        df = pd.DataFrame({"session_id": session_ids})
         gkf = GroupKFold(n_splits=5)
-        splits = list(gkf.split(df, groups=df["speaker_id"]))
+        splits = list(gkf.split(df, groups=df["session_id"]))
 
         fold_idx = config.current_fold - 1
         train_idx, val_idx = splits[fold_idx]

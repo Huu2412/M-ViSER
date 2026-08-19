@@ -7,9 +7,9 @@ ViSER (Vietnamese Speech Emotion Recognition) is a specialized speech emotion re
 - **Acoustic Backbone**: Utilizes [ViP-VL](https://huggingface.co/khanhld/vip-vl-base-vie) (ChunkFormer) or Wav2Vec2 for acoustic feature extraction.
 - **Text Backbone**: Employs [PhoBERT-base](https://huggingface.co/vinai/phobert-base) for semantic processing.
 - **ASR Teacher**: Uses [PhoWhisper-medium](https://huggingface.co/vinai/PhoWhisper-medium) as a "Teacher" to generate high-quality transcriptions.
-- **AURORA Fusion Architecture**: Integrates a **Repair MLP** (to correct ASR spelling errors) and an **Audio-Guided Gated Multimodal Unit (GMU)** with an Uncertainty Gate, allowing the model to dynamically assess the reliability of the generated text.
-- **Multi-task Learning & Dual-Branch Training**: The model is trained using a Dual-Branch approach where both the Student (Audio) and Teacher (Text) branches predict emotions and assist each other. It also performs auxiliary tasks like Regional accent recognition and Connectionist Temporal Classification (CTC) ASR.
-- **Imbalanced Data Handling**: Built-in support for Class Weights to handle dataset imbalances for both Emotion and Regional classification.
+- **AURORA Fusion Architecture**: Integrates a **Bidirectional Multi-Head Cross-Attention** module for cross-modal interaction, a **Repair MLP** (to correct ASR spelling errors), and an **Audio-Guided Gated Multimodal Unit (GMU)** with an Uncertainty Gate, allowing the model to dynamically assess the reliability of the generated text.
+- **Multi-task Learning & Knowledge Distillation**: The model is trained using a Dual-Branch approach where the Teacher (Clean Text) distills knowledge to the Student (ASR Text) via KL divergence and Representation Alignment (MSE). It also performs Connectionist Temporal Classification (CTC) as an auxiliary ASR task.
+- **Standard Benchmarking**: Built-in support for IEMOCAP standard evaluation (LOSO-5-fold cross-validation on 4 emotion classes: neutral, happy, angry, sad) and imbalanced data handling via Class Weights.
 
 ---
 
@@ -83,7 +83,7 @@ python evaluate.py --checkpoint checkpoints/checkpoint_epoch_X_acc_Y.pt
 ---
 
 ## 🧩 Loss Mechanism & Hyperparameters
-The total loss of ViSER is a combination of 4 different objectives to optimize the Dual-Branch setup:
-`L_total = α_s_emo * L_emotion_student + α_t_emo * L_emotion_teacher + α_ctc * L_ctc + α_regional * L_regional`
+The total loss of ViSER is a combination of 5 different objectives to optimize the Dual-Branch setup and Knowledge Distillation:
+`L_total = α_s_emo * L_emotion_student + α_t_emo * L_emotion_teacher + α_ctc * L_ctc + α_kd * L_kd + α_distill * L_distill`
 
-You can easily adjust these `α` (alpha) weights, as well as define Class Weights (`emotion_class_weights`, `regional_class_weights`) inside the `config/config.yaml` file to handle imbalanced data.
+You can easily adjust these `α` (alpha) weights, as well as define Class Weights (`emotion_class_weights`) inside the `config/config.yaml` file to handle imbalanced data.
