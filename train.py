@@ -326,7 +326,7 @@ def train(config):
         # VD: Epoch 01 | Train [L:2.4051 L_emo:1.2051 L_ctc:0.1234 A:54.3%] | Val [L:1.2141 A:65.4% mF1:64.2%] | Time: 120.5s
         log_line = (
             f"Epoch {epoch+1:02d} | "
-            f"Train [L:{epoch_losses['l_total']:.4f} L_emo:{epoch_losses['l_emotion_student']:.4f} L_ctc:{epoch_losses['l_ctc']:.4f} A:{train_emo_acc:.1f}%] | "
+            f"Train [L:{epoch_losses['l_total']:.4f} L_emo:{epoch_losses['l_emotion_student']:.4f} L_ctc:{epoch_losses['l_ctc']:.4f} L_kd:{epoch_losses['l_kd']:.4f} A:{train_emo_acc:.1f}%] | "
             f"Val [L:{val_metrics['val_loss']:.4f} A:{val_metrics.get('wa', 0)*100:.1f}% mF1:{val_metrics['macro_f1']*100:.1f}%] | "
             f"Time: {epoch_time:.1f}s"
         )
