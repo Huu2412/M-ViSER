@@ -8,10 +8,38 @@ Provides:
   - logits_ctc:    [B, T, V]  (CTC logits for student ASR)
 """
 
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoFeatureExtractor
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_normalize(tensor: torch.Tensor, name: str = "tensor") -> torch.Tensor:
+    """Replace NaN/Inf with zeros. Log a warning if any are found."""
+    if not torch.isfinite(tensor).all():
+        logger.warning(
+            f"NaN/Inf detected in {name} "
+            f"(nan={tensor.isnan().sum().item()}, "
+            f"inf={tensor.isinf().sum().item()}). Replacing with zeros."
+        )
+        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+    return tensor
+
+
+class SafeLayerNorm(nn.LayerNorm):
+    """
+    LayerNorm với guard chống zero-variance (nguồn gốc NaN khi nhận all-zero input).
+    Thêm tiny noise nếu std < eps để tránh division by zero bên trong LayerNorm.
+    """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Nếu std quá nhỏ (all-zero / all-constant), thêm tiny noise
+        std = x.std(dim=-1, keepdim=True)
+        if (std < 1e-6).any():
+            x = x + torch.randn_like(x) * 1e-6
+        return super().forward(x)
 
 
 class Wav2Vec2AcousticEncoder(nn.Module):
@@ -26,7 +54,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         self.config = config
         self.hidden_size = config.acoustic_hidden_size
 
-        # ── Load ViP-VL backbone ─────────────────────────────────────────────
+        # ── Load Wav2Vec2 backbone ───────────────────────────────────────────
         self.encoder = AutoModel.from_pretrained(
             config.acoustic_model_name,
             cache_dir=config.cache_dir,
@@ -47,10 +75,11 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         self.ctc_head = nn.Linear(self.hidden_size, config.vocab_size)
 
         # ── Projection to fusion_dim for downstream AURORA fusion ────────────
+        # Dùng SafeLayerNorm thay LayerNorm để chống NaN khi input all-zero
         self.audio_proj = nn.Sequential(
             nn.Linear(self.hidden_size, config.fusion_dim),
             nn.GELU(),
-            nn.LayerNorm(config.fusion_dim),
+            SafeLayerNorm(config.fusion_dim),
             nn.Dropout(config.dropout),
         )
 
@@ -67,19 +96,50 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             for param in self.encoder.encoder.feature_extractor.parameters():
                 param.requires_grad = False
 
-    def get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor, max_input_len: int = None, max_output_len: int = None):
+    def get_feat_extract_output_lengths(
+        self,
+        input_lengths: torch.LongTensor,
+        max_input_len: int = None,
+        max_output_len: int = None,
+    ):
         """
         Compute CTC output lengths from input audio lengths.
-        To ensure 100% accuracy regardless of backbone (Wav2Vec2 vs ChunkFormer),
-        we use the dynamic ratio: (actual_audio_len / max_audio_len) * max_feat_len
+        Uses dynamic ratio: (actual_audio_len / max_audio_len) * max_feat_len
         """
         if max_input_len is not None and max_output_len is not None:
-            return torch.round(input_lengths.float() * (max_output_len / max_input_len)).long()
-            
+            lengths = torch.round(
+                input_lengths.float() * (max_output_len / max_input_len)
+            ).long()
+            # Clamp giữa [1, max_output_len] để tránh out-of-range
+            return lengths.clamp(min=1, max=max_output_len)
+
         # Fallback if dimensions are not provided
         if hasattr(self.encoder, "_get_feat_extract_output_lengths"):
             return self.encoder._get_feat_extract_output_lengths(input_lengths)
         return (input_lengths - 1) // 320 + 1
+
+    def _sanitize_audio(self, input_values: torch.Tensor) -> torch.Tensor:
+        """
+        Làm sạch audio input trước khi đưa vào Wav2Vec2:
+          1. Thay NaN/Inf bằng 0
+          2. Normalize về [-1, 1] nếu có giá trị cực lớn (> 10)
+             (Wav2Vec2 kỳ vọng normalized waveform ~[-1, 1])
+        """
+        input_values = _safe_normalize(input_values, "input_values")
+
+        # Normalize per-sample nếu amplitude quá lớn
+        max_abs = input_values.abs().amax(dim=-1, keepdim=True)  # [B, 1]
+        too_large = (max_abs > 10.0).squeeze(-1)
+        if too_large.any():
+            logger.warning(
+                f"{too_large.sum().item()} audio sample(s) have amplitude > 10. "
+                "Normalizing to [-1, 1]."
+            )
+            # Peak normalize: chia cho max_abs, clamp để tránh div by zero
+            scale = max_abs.clamp(min=1e-8)
+            input_values = input_values / scale
+
+        return input_values
 
     def forward(
         self,
@@ -93,13 +153,8 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             z_audio:       [B, fusion_dim] - mean-pooled + projected
             logits_ctc:    [B, T, vocab_size] - CTC logits
         """
-        import logging as _logging
-        _logger = _logging.getLogger(__name__)
-
-        # ── Guard 1: sanitize input audio (NaN/Inf từ dataset) ──────────────
-        if not torch.isfinite(input_values).all():
-            _logger.warning("NaN/Inf detected in input_values. Replacing with zeros.")
-            input_values = torch.nan_to_num(input_values, nan=0.0, posinf=1.0, neginf=-1.0)
+        # ── Guard 1: sanitize & normalize input audio ────────────────────────
+        input_values = self._sanitize_audio(input_values)
 
         outputs = self.encoder(
             input_values,
@@ -108,21 +163,19 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         )
 
         # Last layer hidden states: [B, T, H]
-        hidden_states = outputs[0].float()  # Cast to float32 để tránh overflow
+        hidden_states = outputs[0].float()  # cast to float32
 
         # ── Guard 2: sanitize hidden_states từ Wav2Vec2 ──────────────────────
-        if not torch.isfinite(hidden_states).all():
-            _logger.warning("NaN/Inf detected in Wav2Vec2 hidden_states. Replacing with zeros.")
-            hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=0.0, neginf=0.0)
+        hidden_states = _safe_normalize(hidden_states, "Wav2Vec2 hidden_states")
 
         hidden_states = self.dropout(hidden_states)
 
-        # CTC logits (Student ASR) - same as MTL-SER lm_head
+        # CTC logits (Student ASR)
         logits_ctc = self.ctc_head(hidden_states)  # [B, T, V]
+        logits_ctc = _safe_normalize(logits_ctc, "logits_ctc")
 
-        # Mean pool over time → utterance embedding → project to fusion_dim
+        # ── Mean pool over time → utterance embedding ────────────────────────
         if attention_mask is not None:
-            # Mask padding before pooling (use dynamic ratio for 100% accuracy)
             max_input_len = attention_mask.shape[1]
             max_output_len = hidden_states.shape[1]
             feat_len = self.get_feat_extract_output_lengths(
@@ -132,49 +185,36 @@ class Wav2Vec2AcousticEncoder(nn.Module):
                 hidden_states.shape[:2], dtype=torch.bool, device=hidden_states.device
             )
             for i, length in enumerate(feat_len):
-                # Ensure length does not exceed max_output_len
                 length = min(length.item(), max_output_len)
-                # Đảm bảo length >= 1 để không chia cho 0
-                length = max(length, 1)
+                length = max(length, 1)  # đảm bảo ít nhất 1 frame
                 mask[i, :length] = True
-            # Masked mean (clamp(min=1) để tránh chia cho 0)
+
+            # Masked mean — clamp(min=1) tránh chia cho 0
             hidden_masked = hidden_states * mask.unsqueeze(-1)
             z_audio = hidden_masked.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)
         else:
             z_audio = hidden_states.mean(dim=1)  # [B, H]
 
-        # ── Guard 3: sanitize z_audio TRƯỚC audio_proj ───────────────────────
-        # QUAN TRỌNG: LayerNorm trong audio_proj sẽ ra NaN nếu nhận
-        # vector all-zero hoặc all-identical (variance=0). Đây là ROOT CAUSE
-        # của warning "NaN/Inf detected in z_audio after projection".
-        if not torch.isfinite(z_audio).all():
-            _logger.warning("NaN/Inf detected in z_audio after pooling. Replacing with zeros.")
-            z_audio = torch.nan_to_num(z_audio, nan=0.0, posinf=0.0, neginf=0.0)
+        # ── Guard 3: sanitize z_audio TRƯỚC audio_proj ──────────────────────
+        # QUAN TRỌNG: SafeLayerNorm xử lý zero-variance bên trong audio_proj,
+        # nhưng vẫn cần clean NaN/Inf có thể xuất hiện sau mean-pool.
+        z_audio = _safe_normalize(z_audio, "z_audio (pre-proj)")
 
-        # Thêm tiny noise để tránh degenerate LayerNorm input (all-zero vector)
-        # Điều này không ảnh hưởng đáng kể đến training nhưng ngăn NaN hoàn toàn.
-        if (z_audio.std(dim=-1) < 1e-6).any():
-            z_audio = z_audio + 1e-6 * torch.randn_like(z_audio)
-
+        # ── Project to fusion_dim ────────────────────────────────────────────
         z_audio = self.audio_proj(z_audio)  # [B, fusion_dim]
 
-        # ── Guard 4: final check sau audio_proj ──────────────────────────────
-        if not torch.isfinite(z_audio).all():
-            _logger.warning("NaN/Inf detected in z_audio after audio_proj. Replacing with zeros.")
-            z_audio = torch.nan_to_num(z_audio, nan=0.0, posinf=0.0, neginf=0.0)
-
-        if not torch.isfinite(logits_ctc).all():
-            logits_ctc = torch.nan_to_num(logits_ctc, nan=0.0, posinf=0.0, neginf=0.0)
+        # ── Guard 4: final check sau audio_proj ─────────────────────────────
+        z_audio = _safe_normalize(z_audio, "z_audio (post-proj)")
 
         return {
             "hidden_states": hidden_states,    # [B, T, H]
-            "z_audio": z_audio,                 # [B, fusion_dim]
-            "logits_ctc": logits_ctc,           # [B, T, vocab_size]
+            "z_audio": z_audio,                # [B, fusion_dim]
+            "logits_ctc": logits_ctc,          # [B, T, vocab_size]
         }
 
 
 class AcousticFeatureExtractor:
-    """Helper to load ViP-VL feature extractor / processor."""
+    """Helper to load Wav2Vec2 feature extractor / processor."""
 
     @staticmethod
     def from_pretrained(model_name: str, cache_dir: str = None):
@@ -183,9 +223,10 @@ class AcousticFeatureExtractor:
                 model_name, cache_dir=cache_dir
             )
         except OSError:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Feature extractor config not found for '{model_name}'. Falling back to 'facebook/wav2vec2-base'.")
+            logger.warning(
+                f"Feature extractor config not found for '{model_name}'. "
+                "Falling back to 'facebook/wav2vec2-base'."
+            )
             from transformers import Wav2Vec2FeatureExtractor
             return Wav2Vec2FeatureExtractor.from_pretrained(
                 "facebook/wav2vec2-base", cache_dir=cache_dir

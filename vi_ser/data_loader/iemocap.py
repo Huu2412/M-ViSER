@@ -201,6 +201,17 @@ class ViSERDataset(Dataset):
         max_len = int(self.config.max_audio_length_sec * self.config.sampling_rate)
         speech = speech[:max_len]
 
+        # ── Normalize audio ─────────────────────────────────────────────────
+        # Wav2Vec2 kỳ vọng waveform ~[-1, 1]. Nếu amplitude quá lớn hoặc có
+        # NaN/Inf (từ augmentation hoặc file hỏng) → Wav2Vec2 sẽ sinh NaN hidden states.
+        speech = np.nan_to_num(speech, nan=0.0, posinf=1.0, neginf=-1.0)
+        max_abs = np.abs(speech).max()
+        if max_abs > 1e-6:  # tránh chia cho 0 với audio im lặng
+            speech = speech / max_abs  # peak normalize về [-1, 1]
+        else:
+            # Audio im lặng hoàn toàn: thêm tiny noise để tránh all-zero tensor
+            speech = np.random.randn(len(speech)).astype(np.float32) * 1e-6
+
         # ── Feature extraction (ViP-VL processor) ──────────────────────────
         inputs = self.feature_extractor(
             speech,

@@ -8,8 +8,20 @@ Inspired by AURORA AudioGuidedGatedFusion.
 The key insight: audio features determine HOW MUCH to trust the text branch.
 """
 
+import logging
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
+
+
+class SafeLayerNorm(nn.LayerNorm):
+    """LayerNorm với guard chống zero-variance để tránh NaN."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        std = x.std(dim=-1, keepdim=True)
+        if (std < 1e-6).any():
+            x = x + torch.randn_like(x) * 1e-6
+        return super().forward(x)
 
 
 class AudioGuidedGatedFusion(nn.Module):
@@ -50,7 +62,8 @@ class AudioGuidedGatedFusion(nn.Module):
             nn.Dropout(dropout),
         )
 
-        self.norm = nn.LayerNorm(fusion_dim)
+        # SafeLayerNorm để tránh NaN khi fused vector gần all-zero
+        self.norm = SafeLayerNorm(fusion_dim)
 
     def forward(
         self,
@@ -73,8 +86,24 @@ class AudioGuidedGatedFusion(nn.Module):
         # g controls audio prominence; alpha controls ASR confidence
         fused = g * audio_feat + (1 - g) * alpha * text_feat  # [B, fusion_dim]
 
+        # Guard trước FFN: tránh NaN propagation vào refinement
+        if not torch.isfinite(fused).all():
+            logger.warning("NaN/Inf in fused before FFN. Replacing with zeros.")
+            fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
+
         # FFN refinement with residual connection
         refined = self.fusion_ffn(fused)                   # [B, fusion_dim]
+
+        # Guard trước LayerNorm
+        if not torch.isfinite(refined).all():
+            logger.warning("NaN/Inf in refined after FFN. Replacing with zeros.")
+            refined = torch.nan_to_num(refined, nan=0.0, posinf=0.0, neginf=0.0)
+
         z_fused = self.norm(fused + refined)               # residual + norm
+
+        # Final guard
+        if not torch.isfinite(z_fused).all():
+            logger.warning("NaN/Inf in z_fused after GMU norm. Replacing with zeros.")
+            z_fused = torch.nan_to_num(z_fused, nan=0.0, posinf=0.0, neginf=0.0)
 
         return z_fused
