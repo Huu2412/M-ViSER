@@ -80,7 +80,21 @@ class ViSERLoss(nn.Module):
         target_lengths = labels_mask.sum(-1)
         flattened_targets = ctc_labels.masked_select(labels_mask)
 
-        log_probs = F.log_softmax(logits_ctc, dim=-1).transpose(0, 1)
+        # ── Guard: skip samples where input_len < target_len (CTC requirement) ──
+        # CTC yêu cầu input_length >= target_length, nếu không sẽ trả -inf/NaN.
+        valid_mask = input_lengths >= target_lengths
+        if not valid_mask.all():
+            import logging
+            logging.getLogger(__name__).warning(
+                f"CTC: {(~valid_mask).sum().item()} samples bị loại do "
+                f"input_length < target_length. Clamp input_lengths."
+            )
+            # Clamp để CTC không crash: tăng input_lengths lên bằng target_lengths
+            input_lengths = torch.maximum(input_lengths, target_lengths)
+
+        # Clamp log_probs để tránh -inf
+        log_probs = F.log_softmax(logits_ctc.float(), dim=-1).transpose(0, 1)
+        log_probs = log_probs.clamp(min=-100.0)
 
         with torch.backends.cudnn.flags(enabled=False):
             loss = F.ctc_loss(
@@ -90,8 +104,12 @@ class ViSERLoss(nn.Module):
                 target_lengths,
                 blank=0,  # pad_token_id
                 reduction="mean",
-                zero_infinity=self.ctc_zero_infinity,
+                zero_infinity=True,  # Always True để chắc chắn không NaN
             )
+
+        # Final guard: nếu vẫn NaN/Inf thì trả 0
+        if not torch.isfinite(loss):
+            return torch.tensor(0.0, device=logits_ctc.device)
         return loss
 
     def _kd_loss(
@@ -138,14 +156,22 @@ class ViSERLoss(nn.Module):
         # ── 1. Primary: Emotion Classification (CE) ──────────────────────────
         if self.ce_loss.weight is not None and self.ce_loss.weight.device != device:
             self.ce_loss.weight = self.ce_loss.weight.to(device)
-            
+
+        # Cast logits sang float32 để tránh overflow khi dùng fp16/bf16
+        logits_emotion_student = logits_emotion_student.float()
+
         l_emotion_student = self.ce_loss(logits_emotion_student, emotion_labels)
+        # Guard NaN từ CE (có thể xảy ra nếu logits bị inf)
+        if not torch.isfinite(l_emotion_student):
+            l_emotion_student = torch.tensor(0.0, device=device, requires_grad=True)
         loss_dict["l_emotion_student"] = l_emotion_student.item()
-        loss_dict["l_emotion"] = l_emotion_student.item() # for backward compatibility in logs
-        
+        loss_dict["l_emotion"] = l_emotion_student.item()  # backward compat
+
         l_emotion_teacher = torch.tensor(0.0, device=device)
         if logits_emotion_teacher is not None and self.alpha_teacher_emotion > 0:
-            l_emotion_teacher = self.ce_loss(logits_emotion_teacher, emotion_labels)
+            l_emotion_teacher = self.ce_loss(logits_emotion_teacher.float(), emotion_labels)
+            if not torch.isfinite(l_emotion_teacher):
+                l_emotion_teacher = torch.tensor(0.0, device=device)
         loss_dict["l_emotion_teacher"] = l_emotion_teacher.item()
 
         # ── 2. Auxiliary: CTC Student ASR ────────────────────────────────────
@@ -164,16 +190,18 @@ class ViSERLoss(nn.Module):
         # ── 3. Knowledge Distillation (KL) ───────────────────────────────────
         l_kd = torch.tensor(0.0, device=device)
         if logits_emotion_teacher is not None and self.alpha_kd > 0:
-            l_kd = self._kd_loss(logits_emotion_student, logits_emotion_teacher.detach())
+            l_kd = self._kd_loss(logits_emotion_student, logits_emotion_teacher.float().detach())
+            if not torch.isfinite(l_kd):
+                l_kd = torch.tensor(0.0, device=device)
         loss_dict["l_kd"] = l_kd.item()
 
         # ── 4. Representation Alignment (MSE) ────────────────────────────────
         l_distill = torch.tensor(0.0, device=device)
         if z_teacher_rep is not None and self.alpha_distill > 0:
             l_distill = self.mse_loss(z_fused, z_teacher_rep.detach())
+            if not torch.isfinite(l_distill):
+                l_distill = torch.tensor(0.0, device=device)
         loss_dict["l_distill"] = l_distill.item()
-
-
 
         # ── Total Loss ────────────────────────────────────────────────────────
         l_total = (

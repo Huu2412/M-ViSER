@@ -100,7 +100,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         )
 
         # Last layer hidden states: [B, T, H]
-        hidden_states = outputs[0]
+        hidden_states = outputs[0].float()  # Cast to float32 để tránh overflow
         hidden_states = self.dropout(hidden_states)
 
         # CTC logits (Student ASR) - same as MTL-SER lm_head
@@ -120,14 +120,27 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             for i, length in enumerate(feat_len):
                 # Ensure length does not exceed max_output_len
                 length = min(length.item(), max_output_len)
+                # Đảm bảo length >= 1 để không chia cho 0
+                length = max(length, 1)
                 mask[i, :length] = True
-            # Masked mean
+            # Masked mean (clamp(min=1) để tránh chia cho 0)
             hidden_masked = hidden_states * mask.unsqueeze(-1)
             z_audio = hidden_masked.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)
         else:
             z_audio = hidden_states.mean(dim=1)  # [B, H]
 
         z_audio = self.audio_proj(z_audio)  # [B, fusion_dim]
+
+        # ── NaN guard: thay NaN/Inf bằng 0 (trường hợp audio khống) ──
+        if not torch.isfinite(z_audio).all():
+            import logging
+            logging.getLogger(__name__).warning(
+                "NaN/Inf detected in z_audio after projection. Replacing with zeros."
+            )
+            z_audio = torch.nan_to_num(z_audio, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if not torch.isfinite(logits_ctc).all():
+            logits_ctc = torch.nan_to_num(logits_ctc, nan=0.0, posinf=0.0, neginf=0.0)
 
         return {
             "hidden_states": hidden_states,    # [B, T, H]

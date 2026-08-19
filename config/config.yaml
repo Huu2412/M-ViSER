@@ -69,8 +69,8 @@ training:
   gradient_accumulation_steps: 4
 
   # --- Learning Rates ---
-  lr:                         0.0002
-  backbone_lr:                0.00001  # Low LR for pre-trained backbones
+  lr:                         0.0001   # Global fallback LR (reduced to prevent gradient explosion)
+  backbone_lr:                0.00001  # Low LR for pre-trained backbones (Wav2Vec2, BERT)
   head_lr:                    0.0001   # Higher LR for fusion/classifier heads
 
   # --- Misc ---
