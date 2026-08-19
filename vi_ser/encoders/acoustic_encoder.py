@@ -59,6 +59,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             config.acoustic_model_name,
             cache_dir=config.cache_dir,
             use_safetensors=False,
+            attn_implementation="eager",  # CRITICAL: Fixes Wav2Vec2 SDPA NaN bug on padded tokens
         )
 
         # Freeze CNN feature extractor (same as MTL-SER approach)
@@ -120,25 +121,16 @@ class Wav2Vec2AcousticEncoder(nn.Module):
 
     def _sanitize_audio(self, input_values: torch.Tensor) -> torch.Tensor:
         """
-        Làm sạch audio input trước khi đưa vào Wav2Vec2:
-          1. Thay NaN/Inf bằng 0
-          2. Normalize về [-1, 1] nếu có giá trị cực lớn (> 10)
-             (Wav2Vec2 kỳ vọng normalized waveform ~[-1, 1])
+        Removes NaN/Inf from audio input before Wav2Vec2.
+        NOTE: Do NOT re-normalize here. input_values come from Wav2Vec2FeatureExtractor
+        which applies (x-mean)/std — values in [-5, +20] are NORMAL and expected.
+        Re-normalizing to [-1,1] would corrupt the Wav2Vec2 input and cause NaN!
         """
-        input_values = _safe_normalize(input_values, "input_values")
-
-        # Normalize per-sample nếu amplitude quá lớn
-        max_abs = input_values.abs().amax(dim=-1, keepdim=True)  # [B, 1]
-        too_large = (max_abs > 10.0).squeeze(-1)
-        if too_large.any():
-            logger.warning(
-                f"{too_large.sum().item()} audio sample(s) have amplitude > 10. "
-                "Normalizing to [-1, 1]."
-            )
-            # Peak normalize: chia cho max_abs, clamp để tránh div by zero
-            scale = max_abs.clamp(min=1e-8)
-            input_values = input_values / scale
-
+        # Only fix NaN/Inf — do NOT touch magnitude
+        if not torch.isfinite(input_values).all():
+            n_bad = (~torch.isfinite(input_values)).sum().item()
+            logger.warning(f"{n_bad} NaN/Inf value(s) in input_values. Replacing with 0.")
+            input_values = torch.nan_to_num(input_values, nan=0.0, posinf=0.0, neginf=0.0)
         return input_values
 
     def forward(
