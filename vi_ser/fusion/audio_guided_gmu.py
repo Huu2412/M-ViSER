@@ -27,8 +27,8 @@ class AudioGuidedGatedFusion(nn.Module):
     """
     Audio-Guided Gated Multimodal Unit.
 
-    The gate is computed from the audio embedding (audio-centric fusion):
-        g = sigmoid(audio_proj(z_audio))         -- audio gate
+    The gate is computed from both modalities to decide trust levels:
+        g = sigmoid(audio_gate_proj(z_audio) + text_gate_proj(z_text_repaired))
         z_fused = g ⊙ audio_proj(z_audio) + (1-g) ⊙ text_proj(z_text_repaired)
 
     Additionally, the UncertaintyGate alpha scales the text contribution:
@@ -45,8 +45,9 @@ class AudioGuidedGatedFusion(nn.Module):
         super().__init__()
         self.fusion_dim = fusion_dim
 
-        # Audio-driven gate (computed from audio features)
+        # Gate projections (both modalities)
         self.audio_gate_proj = nn.Linear(fusion_dim, fusion_dim)
+        self.text_gate_proj = nn.Linear(fusion_dim, fusion_dim)
 
         # Projection layers (both inputs already at fusion_dim)
         self.audio_proj = nn.Linear(fusion_dim, fusion_dim)
@@ -74,8 +75,8 @@ class AudioGuidedGatedFusion(nn.Module):
         Returns:
             z_fused: [B, fusion_dim]
         """
-        # Audio-driven gate: how much to use audio vs text
-        g = torch.sigmoid(self.audio_gate_proj(z_audio))  # [B, fusion_dim]
+        # Gate: how much to use audio vs text (informed by both modalities)
+        g = torch.sigmoid(self.audio_gate_proj(z_audio) + self.text_gate_proj(z_text_repaired))  # [B, fusion_dim]
 
         # Project both modalities
         audio_feat = self.audio_proj(z_audio)              # [B, fusion_dim]

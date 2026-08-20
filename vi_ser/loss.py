@@ -35,6 +35,7 @@ class ViSERLoss(nn.Module):
         self.alpha_distill  = config.alpha_distill
         self.temperature    = config.kd_temperature
         self.ctc_zero_infinity = config.ctc_zero_infinity
+        self.pad_token_id = getattr(config, "pad_token_id", 0)
 
         label_smoothing = getattr(config, "label_smoothing", 0.0)
         
@@ -95,7 +96,7 @@ class ViSERLoss(nn.Module):
         with torch.backends.cudnn.flags(enabled=False):
             loss_all = F.ctc_loss(
                 log_probs, flattened_targets, input_lengths, target_lengths,
-                blank=0, reduction="none", zero_infinity=self.ctc_zero_infinity,
+                blank=self.pad_token_id, reduction="none", zero_infinity=self.ctc_zero_infinity,
             )
             
             # Identify samples where zero_infinity forced loss to 0.0 due to invalid alignment.

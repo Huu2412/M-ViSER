@@ -133,11 +133,14 @@ class SERModel(nn.Module):
             audio_hidden, audio_mask, text_hidden, text_mask
         )
 
-        # Repair noisy CTC text embedding using audio guidance
-        z_repaired = self.repair_mlp(z_audio_enc, z_text_enc)
-
         # Uncertainty gate: how reliable is the CTC text?
         alpha = self.uncertainty_gate(z_audio_enc, z_text_enc)
+
+        # Repair noisy CTC text embedding using audio guidance
+        if getattr(self.config, "repair_use_alpha", False):
+            z_repaired = self.repair_mlp(z_audio_enc, z_text_enc, alpha)
+        else:
+            z_repaired = self.repair_mlp(z_audio_enc, z_text_enc)
 
         # Audio-guided gated fusion
         z_fused = self.shared_gmu(z_audio_enc, z_repaired, alpha)

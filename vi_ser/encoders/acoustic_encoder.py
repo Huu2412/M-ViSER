@@ -57,7 +57,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         self.encoder = AutoModel.from_pretrained(
             config.acoustic_model_name,
             cache_dir=config.cache_dir,
-            apply_spec_augment=False,  # CRITICAL: Prevent zero-variance NaN on short audio
+            apply_spec_augment=True,  # Will be dynamically disabled for short audio in forward
             use_safetensors=False,
             attn_implementation="eager",  # CRITICAL: Fixes Wav2Vec2 SDPA NaN bug on padded tokens
         )
@@ -161,6 +161,13 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         """
         # ── Guard 1: sanitize & normalize input audio ────────────────────────
         input_values = self._sanitize_audio(input_values)
+
+        # Dynamic SpecAugment guard: disable if audio is too short to prevent zero-variance NaN
+        if hasattr(self.encoder, "config") and hasattr(self.encoder.config, "apply_spec_augment"):
+            if input_values.shape[1] < 400:
+                self.encoder.config.apply_spec_augment = False
+            else:
+                self.encoder.config.apply_spec_augment = True
 
         outputs = self.encoder(
             input_values,

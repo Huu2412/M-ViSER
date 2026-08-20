@@ -29,12 +29,14 @@ class ViSERConfig:
     delta_scale: float = 0.3
     uncertainty_alpha_min: float = 0.05
     uncertainty_alpha_max: float = 0.95
+    repair_use_alpha: bool = False  # Ablation flag: if True, z_repaired = z_asr + alpha * delta
 
     # ── Classifier Heads ─────────────────────────────────────────────────────
     num_emotion_classes: int = 4
     emotion_class_weights: Optional[list] = None
     classifier_hidden_dim: int = 256
     vocab_size: int = 32  # will be overridden from CTC tokenizer
+    pad_token_id: int = 0 # blank token for CTC loss
 
     # ── Loss Weights ─────────────────────────────────────────────────────────
     alpha_student_emotion: float = 1.0

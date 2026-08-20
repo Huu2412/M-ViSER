@@ -10,6 +10,7 @@ Both modules use [z_audio; z_asr] concatenation as input.
 
 import torch
 import torch.nn as nn
+from typing import Optional
 
 
 class RepairMLP(nn.Module):
@@ -48,6 +49,7 @@ class RepairMLP(nn.Module):
         self,
         z_audio: torch.Tensor,  # [B, audio_dim]
         z_asr: torch.Tensor,    # [B, text_dim]
+        alpha: Optional[torch.Tensor] = None, # [B, 1]
     ) -> torch.Tensor:
         """
         Returns:
@@ -56,7 +58,12 @@ class RepairMLP(nn.Module):
         x = torch.cat([z_audio, z_asr], dim=-1)   # [B, audio_dim + text_dim]
         delta_raw = self.mlp(x)                    # [B, output_dim]
         delta = self.delta_scale * torch.tanh(delta_raw)
-        z_repaired = z_asr + delta
+        
+        if alpha is not None:
+            z_repaired = z_asr + alpha * delta
+        else:
+            z_repaired = z_asr + delta
+            
         return z_repaired
 
 
