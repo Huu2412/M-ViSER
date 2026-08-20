@@ -162,18 +162,10 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         # ── Guard 1: sanitize & normalize input audio ────────────────────────
         input_values = self._sanitize_audio(input_values)
 
-        # Dynamic SpecAugment guard: disable if any audio in batch is too short
+        # CRITICAL: Prevent zero-variance NaN on short or silent audio segments
+        # (SpecAugment might mask all non-silent frames, causing LayerNorm NaNs)
         if hasattr(self.encoder, "config") and hasattr(self.encoder.config, "apply_spec_augment"):
-            if attention_mask is not None:
-                min_len = attention_mask.sum(dim=-1).min().item()
-            else:
-                min_len = input_values.shape[1]
-                
-            # If any sequence is < 4000 samples (~250ms), SpecAugment might mask all frames -> NaN
-            if min_len < 4000:
-                self.encoder.config.apply_spec_augment = False
-            else:
-                self.encoder.config.apply_spec_augment = True
+            self.encoder.config.apply_spec_augment = False
 
         outputs = self.encoder(
             input_values,
