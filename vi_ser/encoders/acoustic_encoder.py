@@ -71,6 +71,11 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
+        # Partial Fine-Tuning: unfreeze top N transformer layers
+        num_unfrozen = getattr(config, "num_unfrozen_layers", 0)
+        if num_unfrozen > 0:
+            self._partial_unfreeze(num_unfrozen)
+
         # ── CTC Head (Student ASR) ───────────────────────────────────────────
         self.dropout = nn.Dropout(config.dropout)
         self.ctc_head = nn.Linear(self.hidden_size, config.vocab_size)
@@ -96,6 +101,23 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         ):
             for param in self.encoder.encoder.feature_extractor.parameters():
                 param.requires_grad = False
+
+    def _partial_unfreeze(self, num_unfrozen_layers: int):
+        """Unfreeze the top N transformer layers + CTC head + audio_proj."""
+        if hasattr(self.encoder, "encoder") and hasattr(self.encoder.encoder, "layers"):
+            encoder_layers = self.encoder.encoder.layers
+        elif hasattr(self.encoder, "layers"):
+            encoder_layers = self.encoder.layers
+        else:
+            logger.warning("Cannot find transformer layers for partial unfreeze.")
+            return
+
+        total = len(encoder_layers)
+        n = min(num_unfrozen_layers, total)
+        for layer in encoder_layers[-n:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+        logger.info(f"Partial Fine-Tuning: unfroze top {n}/{total} transformer layers.")
 
     def get_feat_extract_output_lengths(
         self,

@@ -33,6 +33,7 @@ class ViSERLoss(nn.Module):
         self.alpha_ctc      = config.alpha_ctc
         self.alpha_kd       = config.alpha_kd
         self.alpha_distill  = config.alpha_distill
+        self.lambda_hallucination = getattr(config, "lambda_hallucination", 1.0)
         self.temperature    = config.kd_temperature
         self.ctc_zero_infinity = config.ctc_zero_infinity
         self.pad_token_id = getattr(config, "pad_token_id", 0)
@@ -129,6 +130,20 @@ class ViSERLoss(nn.Module):
         p_t     = F.softmax(logits_teacher / T, dim=-1)
         return self.kl_loss(log_p_s, p_t) * (T * T)
 
+    def _hallucination_loss(
+        self,
+        z_student_rep: torch.Tensor,  # [B, fusion_dim]
+        z_teacher_rep: torch.Tensor,  # [B, fusion_dim]
+    ) -> torch.Tensor:
+        """
+        Hallucination loss: cosine similarity between student and teacher representations.
+        Encourages the student to hallucinate representations similar to the teacher's
+        cross-modal fused output, even without access to text.
+        """
+        z_teacher_rep = z_teacher_rep.detach()  # Teacher is frozen for this loss
+        cos_sim = F.cosine_similarity(z_student_rep, z_teacher_rep, dim=-1)  # [B]
+        return (1.0 - cos_sim).mean()  # Higher similarity → lower loss
+
     def forward(
         self,
         # ── Student outputs ──────────────────────────────────────────────────
@@ -210,6 +225,14 @@ class ViSERLoss(nn.Module):
                 l_distill = torch.tensor(0.0, device=device)
         loss_dict["l_distill"] = l_distill.item()
 
+        # ── 5. Hallucination Loss (Cosine Similarity) ────────────────────────
+        l_hallu = torch.tensor(0.0, device=device)
+        if z_teacher_rep is not None and self.lambda_hallucination > 0:
+            l_hallu = self._hallucination_loss(z_fused, z_teacher_rep)
+            if not torch.isfinite(l_hallu):
+                l_hallu = torch.tensor(0.0, device=device)
+        loss_dict["l_hallucination"] = l_hallu.item()
+
         # ── Total Loss ────────────────────────────────────────────────────────
         l_total = (
             self.alpha_student_emotion * l_emotion_student
@@ -217,6 +240,7 @@ class ViSERLoss(nn.Module):
             + self.alpha_ctc      * l_ctc
             + self.alpha_kd       * l_kd
             + self.alpha_distill  * l_distill
+            + self.lambda_hallucination * l_hallu
         )
         loss_dict["l_total"] = l_total.item()
 

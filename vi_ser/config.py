@@ -26,6 +26,7 @@ class ViSERConfig:
     num_heads: int = 8
     dropout: float = 0.3
     repair_hidden_dim: int = 256
+    hallucination_hidden_dim: int = 512
     delta_scale: float = 0.3
     uncertainty_alpha_min: float = 0.05
     uncertainty_alpha_max: float = 0.95
@@ -44,11 +45,13 @@ class ViSERConfig:
     alpha_ctc: float = 0.2
     alpha_kd: float = 0.5
     alpha_distill: float = 0.0
+    lambda_hallucination: float = 1.0
     kd_temperature: float = 2.0
     label_smoothing: float = 0.05
 
     # ── Training ─────────────────────────────────────────────────────────────
     num_epochs: int = 50
+    early_stopping_patience: int = 10
     batch_size: int = 8
     gradient_accumulation_steps: int = 4
 

@@ -28,6 +28,20 @@ dataset:
     hap: 1
     ang: 2
     sad: 3
+
+  augmentations:
+    waveform_augment:
+      prob: 0.3                   # Tỷ lệ 30% số audio trong batch sẽ bị augment
+      pitch_shift:
+        weight: 0.4               # Xác suất rơi vào Pitch Shift (nếu bị augment)
+        n_steps_range: [-1.0, 1.0]
+      noise_injection:
+        weight: 0.4               # Xác suất rơi vào Noise Injection
+        noise_factor_range: [0.001, 0.015]
+      time_shift:
+        weight: 0.2               # Xác suất rơi vào Time Stretch
+        range: [0.9, 1.1]
+
 # ── Model & Architecture ─────────────────────────────────────
 model:
   # Acoustic backbone (Wav2Vec2 for English)
@@ -58,14 +72,16 @@ loss:
   alpha_ctc:             0.2   # Weight for CTC ASR auxiliary loss
   alpha_kd:              0.5   # Weight for KL knowledge distillation
   alpha_distill:         0.0   # Weight for MSE representation alignment
+  lambda_hallucination:  1.0   # Weight for Cosine Similarity hallucination loss
   kd_temperature:        2.0
   label_smoothing:       0.05
 
 # ── Training ─────────────────────────────────────────────────
 training:
   epochs:                     50
+  early_stopping_patience:    10     # Stop if metric doesn't improve for 10 epochs
   batch_size:                 8
-  num_workers:                0      # Set 0 to avoid 'Broken pipe' on Windows
+  num_workers:                8      # Set 0 to avoid 'Broken pipe' on Windows
   gradient_accumulation_steps: 4
 
   # --- Learning Rates ---

@@ -215,6 +215,9 @@ def train(config):
     top_k_checkpoints = []  # List of tuples: (emotion_acc, save_path)
     max_checkpoints = 3
     
+    epochs_no_improve = 0
+    best_early_stopping_metric = 0.0
+    
     print("\n" + "="*50)
     print("STARTING TRAINING")
     print("="*50 + "\n")
@@ -403,6 +406,19 @@ def train(config):
                     logger.info(f"  - Removed old checkpoint: {worst_path}")
         else:
             top_k_checkpoints.pop()
+
+        # ── Early Stopping ───────────────────────────────────────────────────
+        if getattr(config, "early_stopping_patience", 0) > 0:
+            if current_metric > best_early_stopping_metric:
+                best_early_stopping_metric = current_metric
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                logger.info(f"Early stopping counter: {epochs_no_improve}/{config.early_stopping_patience}")
+                if epochs_no_improve >= config.early_stopping_patience:
+                    logger.info("Early stopping triggered! Training stopped.")
+                    print("\n[Early Stopping] Đã dừng quá trình huấn luyện sớm do mô hình không cải thiện.")
+                    break
 
     best_metric = top_k_checkpoints[0][0] if top_k_checkpoints else 0.0
     logger.info(f"Training complete. Best {config.checkpoint_metric}: {best_metric:.4f}")

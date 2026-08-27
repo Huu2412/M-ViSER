@@ -65,6 +65,7 @@ def load_config(yaml_path: str) -> ViSERConfig:
         fusion_dim            = mod.get("fusion_dim",             512),
         repair_hidden_dim     = mod.get("repair_hidden_dim",      256),
         classifier_hidden_dim = mod.get("classifier_hidden_dim",  256),
+        hallucination_hidden_dim = mod.get("hallucination_hidden_dim", 512),
         num_emotion_classes   = mod.get("num_emotion_classes",    4),
         num_heads             = mod.get("num_heads",              8),
         dropout               = mod.get("dropout",                0.3),
@@ -83,10 +84,12 @@ def load_config(yaml_path: str) -> ViSERConfig:
         alpha_ctc             = lss.get("alpha_ctc",      0.2),
         alpha_kd              = lss.get("alpha_kd",       0.5),
         alpha_distill         = lss.get("alpha_distill",  0.0),
+        lambda_hallucination  = lss.get("lambda_hallucination", 1.0),
         kd_temperature        = lss.get("kd_temperature", 2.0),
 
         # training
         num_epochs                  = tr.get("epochs",                      50),
+        early_stopping_patience     = tr.get("early_stopping_patience",     10),
         batch_size                  = tr.get("batch_size",                  8),
         gradient_accumulation_steps = tr.get("gradient_accumulation_steps", 4),
         learning_rate               = tr.get("lr",                          2e-4),

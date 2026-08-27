@@ -1,42 +1,51 @@
 """
 vi_ser/model.py
 
-SER Model: Speech Emotion Recognition
-======================================================
-Integrates MTL-SER (CTC student ASR) + AURORA (Audio-Guided Repair Fusion).
+SER Model: Speech Emotion Recognition — Logit-Guided Hallucination Architecture
+==================================================================================
+Integrates MTL-SER (CTC student ASR) + AURORA (Teacher Cross-Modal Distillation)
+with Logit-Guided Hallucination for the Student path.
 
 Architecture Overview:
 ──────────────────────────────────────────────────────────────────────────────
   Raw Audio
       │
       ▼
-  Wav2Vec2 Encoder ─────────────────────────────────────────────────────────┐
-      │                                                                       │
-      ├── CTC Head → logits_ctc  (Student ASR auxiliary, from MTL-SER)       │
-      └── z_audio [B, fusion_dim] (mean-pooled + projected)                  │
-                                                                              │
-  CTC decode → text (student)                                                │
-      │                                                                       │
-  BERT → z_asr_student [B, fusion_dim]                                       │
-                                                                              │
-  ┌────────────────────────────────────────────────────────────────────┐     │
-  │                    Student Path                                      │     │
-  │  CrossModalEncoders(z_audio, z_asr_student)                        │     │
-  │  → RepairMLP → z_repaired                                          │     │
-  │  → UncertaintyGate → alpha                                         │     │
-  │  → AudioGuidedGMU → z_fused                                        │     │
-  └────────────────────────────────────────────────────────────────────┘     │
-                                                                              │
-  ┌────────────────────────────────────────────────────────────────────┐     │
-  │                    Teacher Path (training only)                      │     │
-  │  Ground-truth text → BERT → z_clean_text                           │     │
-  │  CrossModalEncoders(z_audio, z_clean_text)                         │     │
-  │  AudioGuidedGMU(alpha=1.0) → z_teacher_rep                         │     │
-  │  TeacherEmotionHead → logits_emotion_teacher                       │     │
-  └────────────────────────────────────────────────────────────────────┘     │
-                                                                              │
-  Classifiers:
-      z_fused → EmotionClassifier → logits_emotion_student  (primary)
+  Wav2Vec2 Encoder (Partial Fine-Tuning: top N layers unfrozen)
+      │
+      ├── CTC Head → logits_ctc  [B, T, V]  (ASR auxiliary task, CTC Loss)
+      ├── hidden_states [B, T, H]
+      └── z_audio [B, fusion_dim] (mean-pooled + projected)
+
+  ┌────────────────────────────────────────────────────────────────────┐
+  │                    Student Path (End-to-End)                        │
+  │                                                                      │
+  │  LogitGuidedAttentionPooling(hidden_states, logits_ctc)            │
+  │    → z_asr_aware [B, H]  (ASR-enriched audio, phonetically gated) │
+  │                                                                      │
+  │  HallucinationMLP([z_asr_aware; z_audio])                          │
+  │    → z_student_rep [B, fusion_dim]  (hallucinated fused repr)      │
+  │                                                                      │
+  │  EmotionClassifier(z_student_rep)                                   │
+  │    → logits_emotion_student [B, num_emotion_classes]                │
+  └────────────────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────────────────┐
+  │                    Teacher Path (training only)                      │
+  │                                                                      │
+  │  Ground-truth text → BERT → z_clean_text                           │
+  │  CrossModalEncoders(audio_hidden, z_clean_text)                    │
+  │    → z_audio_enc, z_text_enc                                       │
+  │  AudioGuidedGMU(z_audio_enc, z_text_enc, alpha=1.0)               │
+  │    → z_teacher_rep [B, fusion_dim]                                 │
+  │  TeacherEmotionHead(z_teacher_rep)                                  │
+  │    → logits_emotion_teacher [B, num_emotion_classes]               │
+  └────────────────────────────────────────────────────────────────────┘
+
+  Knowledge Distillation:
+    L_hallucination = 1 - cosine_sim(z_student_rep, z_teacher_rep)
+    L_kd            = KL(student_logits || teacher_logits)
+    L_distill       = MSE(z_student_rep, z_teacher_rep)
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -48,22 +57,21 @@ from .config import ViSERConfig
 from .encoders.acoustic_encoder import Wav2Vec2AcousticEncoder
 from .encoders.text_encoder import BERTTextEncoder
 from .fusion.cross_modal import CrossModalEncoders
-from .fusion.repair_gate import RepairMLP, UncertaintyGate
 from .fusion.audio_guided_gmu import AudioGuidedGatedFusion
+from .fusion.logit_guided_hallucination import LogitGuidedAttentionPooling, HallucinationMLP
 from .fusion.classifiers import EmotionClassifier, TeacherEmotionHead
 
 
 class SERModel(nn.Module):
     """
-    Speech Emotion Recognition model.
+    Speech Emotion Recognition model — Logit-Guided Hallucination Architecture.
 
     Combines:
       - Wav2Vec2 acoustic backbone with CTC head (student ASR, from MTL-SER)
-      - BERT text encoder (for CTC text and teacher clean text)
-      - AURORA-style Audio-Guided Repair + Gated Fusion
-      - Primary: Emotion classification
-      - Auxiliary: CTC speech recognition
-      - Teacher-student KD: Clean GT text teacher → CTC student
+      - BERT text encoder (for teacher clean text only)
+      - Student: LogitGuidedAttentionPooling + HallucinationMLP (End-to-End, no BERT)
+      - Teacher: AURORA-style Cross-Attention + Audio-Guided GMU (training only)
+      - Knowledge Distillation: Student learns to hallucinate Teacher's fused repr
     """
 
     def __init__(self, config: ViSERConfig):
@@ -73,136 +81,108 @@ class SERModel(nn.Module):
         # ── Acoustic Encoder (Wav2Vec2 + CTC head) ───────────────────────────
         self.acoustic_encoder = Wav2Vec2AcousticEncoder(config)
 
-        # ── Text Encoder (BERT) ──────────────────────────────────────────────
+        # ── Text Encoder (BERT — used only by Teacher path) ──────────────────
         self.text_encoder = BERTTextEncoder(config)
 
-        # ── Shared Fusion Modules (AURORA-style) ─────────────────────────────
-        # CrossModal: project text and audio sequences and apply bidirectional cross-attention
-        self.shared_cross_modal = CrossModalEncoders(
+        # ── Student Path: Logit-Guided Hallucination ─────────────────────────
+        self.logit_attn_pool = LogitGuidedAttentionPooling(
+            vocab_size=config.vocab_size,
+            hidden_size=config.acoustic_hidden_size,
+            dropout=config.dropout,
+        )
+        self.hallucination_mlp = HallucinationMLP(
+            audio_hidden_size=config.acoustic_hidden_size,
+            fusion_dim=config.fusion_dim,
+            hidden_dim=getattr(config, "hallucination_hidden_dim", 512),
+            dropout=config.dropout,
+        )
+
+        # ── Teacher Path: Cross-Modal Fusion (AURORA-style) ──────────────────
+        self.teacher_cross_modal = CrossModalEncoders(
             audio_input_dim=config.acoustic_hidden_size,
             text_input_dim=config.text_hidden_size,
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
             num_heads=config.num_heads,
         )
-        self.repair_mlp = RepairMLP(
-            audio_dim=config.fusion_dim,
-            text_dim=config.fusion_dim,
-            hidden_dim=config.repair_hidden_dim,
-            output_dim=config.fusion_dim,
-            dropout=config.dropout,
-            delta_scale=config.delta_scale,
-        )
-        self.uncertainty_gate = UncertaintyGate(
-            audio_dim=config.fusion_dim,
-            text_dim=config.fusion_dim,
-            hidden_dim=config.repair_hidden_dim,
-            dropout=config.dropout,
-            alpha_min=config.uncertainty_alpha_min,
-            alpha_max=config.uncertainty_alpha_max,
-        )
-        self.shared_gmu = AudioGuidedGatedFusion(
+        self.teacher_gmu = AudioGuidedGatedFusion(
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
         )
 
+        # ── Classification Heads ─────────────────────────────────────────────
         self.emotion_classifier = EmotionClassifier(config)
         self.teacher_emotion_classifier = TeacherEmotionHead(config)
 
     def _student_forward(
         self,
-        audio_hidden: torch.Tensor,  # [B, T_a, audio_hidden_size]
-        audio_mask: torch.Tensor,    # [B, T_a]
-        student_texts: List[str],    # CTC-decoded text
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden_states: torch.Tensor,  # [B, T, H]
+        audio_mask: torch.Tensor,     # [B, T]
+        logits_ctc: torch.Tensor,     # [B, T, V]
+        z_audio: torch.Tensor,        # [B, fusion_dim]
+    ) -> torch.Tensor:
         """
-        Student path: audio + CTC text → z_fused via Repair Gate + GMU.
+        Student path: Audio-only End-to-End.
+        Uses CTC logits as attention guide, then hallucinates fused representation.
 
         Returns:
-            z_fused:    [B, fusion_dim]
-            z_repaired: [B, fusion_dim]
-            alpha:      [B, 1]
+            z_student_rep: [B, fusion_dim]
         """
-        # Encode student CTC text with BERT
-        text_out = self.text_encoder(student_texts, device=audio_hidden.device)
-        text_hidden = text_out["hidden_states"]
-        text_mask = text_out["attention_mask"]
+        # Step 1: Logit-Guided Attention Pooling
+        #   CTC logits act as a phonetic highlighter on audio frames
+        z_asr_aware = self.logit_attn_pool(hidden_states, logits_ctc, audio_mask)  # [B, H]
 
-        # Cross-modal alignment
-        z_audio_enc, z_text_enc = self.shared_cross_modal(
-            audio_hidden, audio_mask, text_hidden, text_mask
-        )
+        # Step 2: Hallucination MLP
+        #   Concatenates [z_asr_aware; z_audio] and hallucinates a fused repr
+        z_student_rep = self.hallucination_mlp(z_asr_aware, z_audio)  # [B, fusion_dim]
 
-        # Uncertainty gate: how reliable is the CTC text?
-        alpha = self.uncertainty_gate(z_audio_enc, z_text_enc)
-
-        # Repair noisy CTC text embedding using audio guidance
-        if getattr(self.config, "repair_use_alpha", False):
-            z_repaired = self.repair_mlp(z_audio_enc, z_text_enc, alpha)
-        else:
-            z_repaired = self.repair_mlp(z_audio_enc, z_text_enc)
-
-        # Audio-guided gated fusion
-        z_fused = self.shared_gmu(z_audio_enc, z_repaired, alpha)
-
-        return z_fused, z_repaired, alpha
+        return z_student_rep
 
     def _teacher_forward(
         self,
-        audio_hidden: torch.Tensor,  # [B, T_a, audio_hidden_size]
-        audio_mask: torch.Tensor,    # [B, T_a]
-        teacher_texts: List[str],    # Ground-truth transcripts (clean)
+        hidden_states: torch.Tensor,  # [B, T, H]
+        audio_mask: torch.Tensor,     # [B, T]
+        teacher_texts: List[str],     # Ground-truth transcripts (clean)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Teacher path (training only): audio + clean GT text → teacher_rep + logits.
-        alpha=1.0 (full confidence in clean text, no repair needed).
+        Teacher path (training only): Audio + Clean GT Text → teacher_rep + logits.
+        Uses AURORA-style Cross-Attention + GMU with full confidence (alpha=1.0).
 
         Returns:
-            z_teacher_rep:         [B, fusion_dim]
+            z_teacher_rep:          [B, fusion_dim]
             logits_emotion_teacher: [B, num_emotion_classes]
         """
-        text_out = self.text_encoder(teacher_texts, device=audio_hidden.device)
-        text_hidden = text_out["hidden_states"]
-        text_mask = text_out["attention_mask"]
-        
-        z_audio_enc, z_text_enc = self.shared_cross_modal(
-            audio_hidden, audio_mask, text_hidden, text_mask
+        # Encode clean text with BERT
+        text_out = self.text_encoder(teacher_texts, device=hidden_states.device)
+        text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
+        text_mask = text_out["attention_mask"]     # [B, T_t]
+
+        # Cross-modal alignment (Audio ↔ Clean Text)
+        z_audio_enc, z_text_enc = self.teacher_cross_modal(
+            hidden_states, audio_mask, text_hidden, text_mask
         )
 
-        # Teacher uses full alpha=1.0 (clean text → maximum confidence)
-        alpha_ones = torch.ones(audio_hidden.size(0), 1, device=audio_hidden.device)
-        z_teacher_rep = self.shared_gmu(z_audio_enc, z_text_enc, alpha_ones)
+        # Gated fusion with full confidence (teacher has clean text)
+        alpha_ones = torch.ones(hidden_states.size(0), 1, device=hidden_states.device)
+        z_teacher_rep = self.teacher_gmu(z_audio_enc, z_text_enc, alpha_ones)
 
+        # Teacher emotion classification
         logits_emotion_teacher = self.teacher_emotion_classifier(z_teacher_rep)
+
         return z_teacher_rep, logits_emotion_teacher
-
-    def decode_ctc(self, logits_ctc: torch.Tensor, processor) -> List[str]:
-        """
-        Greedy CTC decode to get student text.
-
-        Args:
-            logits_ctc: [B, T, V]
-            processor: Wav2Vec2Processor / Wav2Vec2CTCTokenizer
-
-        Returns:
-            List of decoded strings
-        """
-        pred_ids = logits_ctc.argmax(dim=-1)  # [B, T]
-        texts = processor.batch_decode(pred_ids.cpu())
-        return texts
 
     def forward(
         self,
         # ── Audio inputs ──────────────────────────────────────────────────────
         input_values: torch.Tensor,           # [B, T_audio]
         attention_mask: torch.Tensor = None,
-        # ── Text inputs ───────────────────────────────────────────────────────
-        student_texts: List[str] = None,      # CTC decoded text (or pre-decoded)
+        # ── Text inputs (Teacher only) ────────────────────────────────────────
         teacher_texts: List[str] = None,      # Ground-truth transcripts (training only)
-        # ── Processor for CTC decode (if student_texts not pre-decoded) ───────
-        processor=None,
         # ── Mode ──────────────────────────────────────────────────────────────
         training_mode: bool = True,           # True: teacher path enabled
+        # ── Unused (kept for backward compat) ─────────────────────────────────
+        student_texts: List[str] = None,      # No longer needed (End-to-End)
+        processor=None,                       # No longer needed
     ) -> Dict:
         """
         Full forward pass.
@@ -210,8 +190,9 @@ class SERModel(nn.Module):
         Returns dict with:
             logits_emotion_student: [B, num_emotion_classes]
             logits_ctc:             [B, T, vocab_size]
-            z_fused:                [B, fusion_dim]
-            alpha:                  [B, 1]
+            z_student_rep:          [B, fusion_dim]
+            z_audio:                [B, fusion_dim]
+            hidden_states:          [B, T, H]
             --- teacher outputs (only if training_mode=True and teacher_texts provided) ---
             logits_emotion_teacher: [B, num_emotion_classes]
             z_teacher_rep:          [B, fusion_dim]
@@ -222,38 +203,29 @@ class SERModel(nn.Module):
             attention_mask=attention_mask,
         )
         hidden_states = acoustic_out["hidden_states"]  # [B, T, H]
-        audio_mask    = acoustic_out["audio_mask"]     # [B, T]
-        z_audio       = acoustic_out["z_audio"]        # [B, fusion_dim]
-        logits_ctc    = acoustic_out["logits_ctc"]     # [B, T, V]
+        audio_mask    = acoustic_out["audio_mask"]      # [B, T]
+        z_audio       = acoustic_out["z_audio"]         # [B, fusion_dim]
+        logits_ctc    = acoustic_out["logits_ctc"]      # [B, T, V]
 
-        # ── Step 2: Decode CTC text (student) ───────────────────────────────
-        if student_texts is None or (len(student_texts) > 0 and student_texts[0] is None):
-            # Online CTC decode (slower; prefer pre-decoded for training)
-            if processor is not None:
-                student_texts = self.decode_ctc(logits_ctc, processor)
-            else:
-                # Fallback: empty strings (audio-only mode)
-                student_texts = [""] * input_values.size(0)
+        # ── Step 2: Student Path (Logit-Guided Hallucination) ────────────────
+        z_student_rep = self._student_forward(
+            hidden_states, audio_mask, logits_ctc, z_audio
+        )
 
-        # ── Step 3: Student Path (AURORA Repair + GMU) ───────────────────────
-        z_fused, z_repaired, alpha = self._student_forward(hidden_states, audio_mask, student_texts)
-
-        # ── Step 4: Emotion Classification ───────────────────────────────────
-        logits_emotion_student = self.emotion_classifier(z_fused)    # [B, num_emo]
+        # ── Step 3: Emotion Classification (Student) ─────────────────────────
+        logits_emotion_student = self.emotion_classifier(z_student_rep)
 
         output = {
             "logits_emotion_student": logits_emotion_student,
             "logits_ctc":             logits_ctc,
-            "z_fused":                z_fused,
-            "z_repaired":             z_repaired,
-            "alpha":                  alpha,
+            "z_student_rep":          z_student_rep,
+            "z_fused":                z_student_rep,      # backward compat alias
             "z_audio":                z_audio,
             "hidden_states":          hidden_states,
-            # Expose acoustic encoder for CTC loss length computation
             "acoustic_encoder":       self.acoustic_encoder,
         }
 
-        # ── Step 5: Teacher Path (training only) ─────────────────────────────
+        # ── Step 4: Teacher Path (training only) ─────────────────────────────
         if training_mode and teacher_texts is not None:
             z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
                 hidden_states, audio_mask, teacher_texts
@@ -272,8 +244,38 @@ class SERModel(nn.Module):
         """Unfreeze Wav2Vec2 for fine-tuning."""
         for param in self.acoustic_encoder.encoder.parameters():
             param.requires_grad = True
-        # Re-freeze CNN feature extractor
         self.acoustic_encoder._freeze_feature_extractor()
+
+    def partial_unfreeze_acoustic(self, num_unfrozen_layers: int = None):
+        """
+        Partial Fine-Tuning: Unfreeze only the top N transformer layers + CTC head.
+        This is the recommended approach for balancing compute and performance.
+        
+        Args:
+            num_unfrozen_layers: Number of top transformer layers to unfreeze.
+                                 If None, uses config.num_unfrozen_layers.
+        """
+        if num_unfrozen_layers is None:
+            num_unfrozen_layers = getattr(self.config, "num_unfrozen_layers", 2)
+
+        # First freeze everything
+        self.freeze_acoustic_backbone()
+
+        # Unfreeze top N transformer layers
+        encoder_layers = self.acoustic_encoder.encoder.encoder.layers
+        total_layers = len(encoder_layers)
+        if num_unfrozen_layers > 0:
+            for layer in encoder_layers[-num_unfrozen_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
+        # Always unfreeze CTC head (needed for CTC loss)
+        for param in self.acoustic_encoder.ctc_head.parameters():
+            param.requires_grad = True
+
+        # Always unfreeze audio projection (needed for z_audio)
+        for param in self.acoustic_encoder.audio_proj.parameters():
+            param.requires_grad = True
 
     def count_parameters(self) -> Dict[str, int]:
         """Count trainable parameters per module."""
