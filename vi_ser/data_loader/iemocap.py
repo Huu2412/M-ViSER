@@ -344,34 +344,23 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         audio_col = "audio" if "audio" in ds.column_names else "path"
         ds = ds.cast_column(audio_col, datasets.Audio(decode=False))
 
-        # ── Xác định session_id để split session-independent (LOSO-5-fold) ──
-        file_col = "file" if "file" in ds.column_names else None
-        if file_col:
-            # AbstractTTS/IEMOCAP: extract session từ filename  Ses01F_impro01_F000 → '01'
-            def extract_session(fname):
-                m = re.match(r"Ses(\d+)", str(fname))
-                return m.group(1) if m else str(fname)[:2]
-            session_ids = [extract_session(f) for f in ds[file_col]]
-        elif "session_id" in ds.column_names:
-            session_ids = ds["session_id"]
-        elif "session" in ds.column_names:
-            session_ids = ds["session"]
-        else:
-            raise ValueError(
-                "Session metadata is required for speaker-independent "
-                "IEMOCAP evaluation. No session column or recognized filename pattern found."
-            )
-
-        df = pd.DataFrame({"session_id": session_ids})
-        gkf = GroupKFold(n_splits=5)
-        splits = list(gkf.split(df, groups=df["session_id"]))
-
-        fold_idx = config.current_fold - 1
-        train_idx, val_idx = splits[fold_idx]
-        logger.info(f"Fold {config.current_fold}: train={len(train_idx)}, val={len(val_idx)}")
-
-        train_hf_ds = ds.select(train_idx)
-        val_hf_ds = ds.select(val_idx)
+        # ── Thực hiện Random Split (Giống AURORA cũ) thay vì LOSO ──
+        # Tạm thời vô hiệu hóa LOSO (GroupKFold) để so sánh công bằng với repo cũ.
+        # Dùng seed để xáo trộn toàn bộ dữ liệu, test_size=0.2 (20% test, 80% train)
+        split_seed = 42 + config.current_fold
+        logger.info(f"Using RANDOM SPLIT (seed={split_seed}) instead of LOSO.")
+        
+        # HuggingFace datasets supports train_test_split directly
+        splits = ds.train_test_split(
+            test_size=0.2, 
+            seed=split_seed,
+            stratify_by_column=emo_col
+        )
+        
+        train_hf_ds = splits["train"]
+        val_hf_ds = splits["test"]
+        
+        logger.info(f"Random Split: train={len(train_hf_ds)}, val={len(val_hf_ds)}")
         
         train_ds = ViSERDataset(
             csv_path=None, config=config, feature_extractor=feature_extractor, ctc_tokenizer=ctc_tokenizer,
