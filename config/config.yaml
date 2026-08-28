@@ -71,7 +71,7 @@ loss:
   alpha_teacher_emotion: 0.5   # Weight for teacher emotion CE loss
   alpha_ctc:             0.2   # Weight for CTC ASR auxiliary loss
   alpha_kd:              0.5   # Weight for KL knowledge distillation
-  alpha_distill:         0.0   # Weight for MSE representation alignment
+  alpha_distill:         0.2   # Weight for MSE representation alignment
   lambda_hallucination:  1.0   # Weight for Cosine Similarity hallucination loss
   kd_temperature:        2.0
   label_smoothing:       0.05
@@ -85,9 +85,9 @@ training:
   gradient_accumulation_steps: 4
 
   # --- Learning Rates ---
-  lr:                         0.0001   # Global fallback LR (reduced to prevent gradient explosion)
-  backbone_lr:                0.00001  # Low LR for pre-trained backbones (Wav2Vec2, BERT)
-  head_lr:                    0.0001   # Higher LR for fusion/classifier heads
+  lr:                         0.0005   # Global fallback LR
+  backbone_lr:                0.0001   # LR for pre-trained backbones (Wav2Vec2, BERT)
+  head_lr:                    0.0005   # LR for fusion/classifier heads
 
   # --- Misc ---
   warmup_epochs:              3

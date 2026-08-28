@@ -45,7 +45,7 @@ class ViSERConfig:
     alpha_ctc: float = 0.2
     alpha_kd: float = 0.5
     alpha_distill: float = 0.0
-    lambda_hallucination: float = 1.0
+    lambda_hallucination: float = 0.0
     kd_temperature: float = 2.0
     label_smoothing: float = 0.05
 
@@ -56,8 +56,8 @@ class ViSERConfig:
     gradient_accumulation_steps: int = 4
 
     # LRs
-    learning_rate: float = 2e-4
-    backbone_lr: float = 1e-5
+    learning_rate: float = 5e-4
+    backbone_lr: float = 1e-4
     head_lr: float = 5e-4
 
     weight_decay: float = 0.01

@@ -60,6 +60,7 @@ from .fusion.cross_modal import CrossModalEncoders
 from .fusion.audio_guided_gmu import AudioGuidedGatedFusion
 from .fusion.logit_guided_hallucination import LogitGuidedAttentionPooling, HallucinationMLP
 from .fusion.classifiers import EmotionClassifier, TeacherEmotionHead
+from .fusion.repair_gate import RepairNetwork
 
 
 class SERModel(nn.Module):
@@ -97,6 +98,23 @@ class SERModel(nn.Module):
             dropout=config.dropout,
         )
 
+        # ── Student Path: ASR-Text Fusion + Repair Gate ───────────────────────
+        self.student_cross_modal = CrossModalEncoders(
+            audio_input_dim=config.acoustic_hidden_size,
+            text_input_dim=config.text_hidden_size,
+            fusion_dim=config.fusion_dim,
+            dropout=config.dropout,
+            num_heads=config.num_heads,
+        )
+        self.student_gmu = AudioGuidedGatedFusion(
+            fusion_dim=config.fusion_dim,
+            dropout=config.dropout,
+        )
+        self.repair_network = RepairNetwork(
+            fusion_dim=config.fusion_dim,
+            vocab_size=config.vocab_size,
+        )
+
         # ── Teacher Path: Cross-Modal Fusion (AURORA-style) ──────────────────
         self.teacher_cross_modal = CrossModalEncoders(
             audio_input_dim=config.acoustic_hidden_size,
@@ -120,21 +138,43 @@ class SERModel(nn.Module):
         audio_mask: torch.Tensor,     # [B, T]
         logits_ctc: torch.Tensor,     # [B, T, V]
         z_audio: torch.Tensor,        # [B, fusion_dim]
+        processor = None,
     ) -> torch.Tensor:
         """
-        Student path: Audio-only End-to-End.
-        Uses CTC logits as attention guide, then hallucinates fused representation.
-
-        Returns:
-            z_student_rep: [B, fusion_dim]
+        Student path: Hybrid AURORA (Hallucination + Repair Gate)
         """
-        # Step 1: Logit-Guided Attention Pooling
-        #   CTC logits act as a phonetic highlighter on audio frames
-        z_asr_aware = self.logit_attn_pool(hidden_states, logits_ctc, audio_mask)  # [B, H]
+        # Step 1: Hallucination (Audio-only ideal text feature approximation)
+        z_asr_aware = self.logit_attn_pool(hidden_states, logits_ctc, audio_mask)
+        z_hallucinated = self.hallucination_mlp(z_asr_aware, z_audio)  # [B, fusion_dim]
 
-        # Step 2: Hallucination MLP
-        #   Concatenates [z_asr_aware; z_audio] and hallucinates a fused repr
-        z_student_rep = self.hallucination_mlp(z_asr_aware, z_audio)  # [B, fusion_dim]
+        z_student_rep = z_hallucinated
+        
+        # Step 2: ASR-Text path + Repair Gate + GMU
+        if processor is not None:
+            # Decode CTC to text (Non-differentiable step)
+            pred_ids = torch.argmax(logits_ctc, dim=-1)
+            asr_texts = processor.batch_decode(pred_ids)
+            
+            # Extract BERT features from ASR texts
+            text_out = self.text_encoder(asr_texts, device=hidden_states.device)
+            text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
+            text_mask = text_out["attention_mask"]    # [B, T_t]
+            
+            # Cross-modal alignment
+            z_audio_enc, z_text_enc = self.student_cross_modal(
+                hidden_states, audio_mask, text_hidden, text_mask
+            )
+            
+            # Step 3: Repair Gate
+            z_text_repaired, alpha = self.repair_network(
+                z_text_asr=z_text_enc,
+                z_hallucinated=z_hallucinated,
+                logits_ctc=logits_ctc,
+                audio_mask=audio_mask
+            )
+            
+            # Step 4: Final Fusion (GMU)
+            z_student_rep = self.student_gmu(z_audio_enc, z_text_repaired, alpha)
 
         return z_student_rep
 
@@ -182,7 +222,7 @@ class SERModel(nn.Module):
         training_mode: bool = True,           # True: teacher path enabled
         # ── Unused (kept for backward compat) ─────────────────────────────────
         student_texts: List[str] = None,      # No longer needed (End-to-End)
-        processor=None,                       # No longer needed
+        processor=None,                       # CTC tokenizer for ASR decoding in Student path
     ) -> Dict:
         """
         Full forward pass.
@@ -207,9 +247,9 @@ class SERModel(nn.Module):
         z_audio       = acoustic_out["z_audio"]         # [B, fusion_dim]
         logits_ctc    = acoustic_out["logits_ctc"]      # [B, T, V]
 
-        # ── Step 2: Student Path (Logit-Guided Hallucination) ────────────────
+        # ── Step 2: Student Path (Hybrid AURORA) ─────────────────────────────
         z_student_rep = self._student_forward(
-            hidden_states, audio_mask, logits_ctc, z_audio
+            hidden_states, audio_mask, logits_ctc, z_audio, processor=processor
         )
 
         # ── Step 3: Emotion Classification (Student) ─────────────────────────
