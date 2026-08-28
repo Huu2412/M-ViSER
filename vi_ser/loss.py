@@ -146,12 +146,12 @@ class ViSERLoss(nn.Module):
 
     def forward(
         self,
+        # ── Labels (required) ────────────────────────────────────────────────
+        emotion_labels:   torch.Tensor,          # [B]
         # ── Student outputs (optional in Stage 1) ─────────────────────────────
         logits_emotion_student: torch.Tensor = None,    # [B, num_emotion_classes]
         logits_ctc:             torch.Tensor = None,    # [B, T, vocab_size]
         z_fused:                torch.Tensor = None,    # [B, fusion_dim]
-        # ── Labels ───────────────────────────────────────────────────────────
-        emotion_labels:   torch.Tensor,          # [B]
         ctc_labels:       torch.Tensor = None,   # [B, L] padded with -100
         input_values:     torch.Tensor = None,   # [B, T_audio]
         attention_mask:   torch.Tensor = None,
