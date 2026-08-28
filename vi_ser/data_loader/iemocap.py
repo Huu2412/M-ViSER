@@ -350,14 +350,16 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         split_seed = 42 + config.current_fold
         logger.info(f"Using RANDOM SPLIT (seed={split_seed}) instead of LOSO.")
         
-        # HuggingFace requires ClassLabel for stratification
-        ds = ds.class_encode_column(emo_col)
+        # HuggingFace requires ClassLabel for stratification, but class_encode_column 
+        # alters the column to return integers. We duplicate it to preserve strings.
+        ds = ds.add_column("stratify_label", ds[emo_col])
+        ds = ds.class_encode_column("stratify_label")
         
         # HuggingFace datasets supports train_test_split directly
         splits = ds.train_test_split(
             test_size=0.2, 
             seed=split_seed,
-            stratify_by_column=emo_col
+            stratify_by_column="stratify_label"
         )
         
         train_hf_ds = splits["train"]
