@@ -219,10 +219,13 @@ class SERModel(nn.Module):
         # ── Text inputs (Teacher only) ────────────────────────────────────────
         teacher_texts: List[str] = None,      # Ground-truth transcripts (training only)
         # ── Mode ──────────────────────────────────────────────────────────────
-        training_mode: bool = True,           # True: teacher path enabled
+        run_student: bool = True,             # Stage 2 or End-to-End
+        run_teacher: bool = True,             # Stage 1 or End-to-End
+        teacher_force_no_grad: bool = False,  # True in Stage 2
         # ── Unused (kept for backward compat) ─────────────────────────────────
         student_texts: List[str] = None,      # No longer needed (End-to-End)
         processor=None,                       # CTC tokenizer for ASR decoding in Student path
+        training_mode: bool = None,           # Deprecated
     ) -> Dict:
         """
         Full forward pass.
@@ -248,12 +251,15 @@ class SERModel(nn.Module):
         logits_ctc    = acoustic_out["logits_ctc"]      # [B, T, V]
 
         # ── Step 2: Student Path (Hybrid AURORA) ─────────────────────────────
-        z_student_rep = self._student_forward(
-            hidden_states, audio_mask, logits_ctc, z_audio, processor=processor
-        )
-
-        # ── Step 3: Emotion Classification (Student) ─────────────────────────
-        logits_emotion_student = self.emotion_classifier(z_student_rep)
+        z_student_rep = None
+        logits_emotion_student = None
+        
+        if run_student:
+            z_student_rep = self._student_forward(
+                hidden_states, audio_mask, logits_ctc, z_audio, processor=processor
+            )
+            # ── Step 3: Emotion Classification (Student) ─────────────────────────
+            logits_emotion_student = self.emotion_classifier(z_student_rep)
 
         output = {
             "logits_emotion_student": logits_emotion_student,
@@ -266,14 +272,35 @@ class SERModel(nn.Module):
         }
 
         # ── Step 4: Teacher Path (training only) ─────────────────────────────
-        if training_mode and teacher_texts is not None:
-            z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
-                hidden_states, audio_mask, teacher_texts
-            )
+        if run_teacher and teacher_texts is not None:
+            if teacher_force_no_grad:
+                with torch.no_grad():
+                    z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
+                        hidden_states, audio_mask, teacher_texts
+                    )
+            else:
+                z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
+                    hidden_states, audio_mask, teacher_texts
+                )
             output["z_teacher_rep"]          = z_teacher_rep
             output["logits_emotion_teacher"] = logits_emotion_teacher
 
         return output
+
+    def freeze_teacher(self):
+        """Freeze all teacher path components (used in Stage 2)."""
+        if hasattr(self, "teacher_cross_modal"):
+            for param in self.teacher_cross_modal.parameters():
+                param.requires_grad = False
+        if hasattr(self, "teacher_gmu"):
+            for param in self.teacher_gmu.parameters():
+                param.requires_grad = False
+        if hasattr(self, "teacher_emotion_classifier"):
+            for param in self.teacher_emotion_classifier.parameters():
+                param.requires_grad = False
+        if hasattr(self, "text_encoder"):
+            for param in self.text_encoder.parameters():
+                param.requires_grad = False
 
     def freeze_acoustic_backbone(self):
         """Freeze all Wav2Vec2 parameters."""

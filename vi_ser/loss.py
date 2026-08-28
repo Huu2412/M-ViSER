@@ -146,10 +146,10 @@ class ViSERLoss(nn.Module):
 
     def forward(
         self,
-        # ── Student outputs ──────────────────────────────────────────────────
-        logits_emotion_student: torch.Tensor,    # [B, num_emotion_classes]
-        logits_ctc:             torch.Tensor,    # [B, T, vocab_size]
-        z_fused:                torch.Tensor,    # [B, fusion_dim]
+        # ── Student outputs (optional in Stage 1) ─────────────────────────────
+        logits_emotion_student: torch.Tensor = None,    # [B, num_emotion_classes]
+        logits_ctc:             torch.Tensor = None,    # [B, T, vocab_size]
+        z_fused:                torch.Tensor = None,    # [B, fusion_dim]
         # ── Labels ───────────────────────────────────────────────────────────
         emotion_labels:   torch.Tensor,          # [B]
         ctc_labels:       torch.Tensor = None,   # [B, L] padded with -100
@@ -168,20 +168,22 @@ class ViSERLoss(nn.Module):
             loss: scalar tensor
             loss_dict: dict of individual loss values for logging
         """
-        device = logits_emotion_student.device
+        device = emotion_labels.device
         loss_dict = {}
 
         # ── 1. Primary: Emotion Classification (CE) ──────────────────────────
         if self.ce_loss.weight is not None and self.ce_loss.weight.device != device:
             self.ce_loss.weight = self.ce_loss.weight.to(device)
 
-        # Cast logits sang float32 để tránh overflow khi dùng fp16/bf16
-        logits_emotion_student = logits_emotion_student.float()
-
-        l_emotion_student = self.ce_loss(logits_emotion_student, emotion_labels)
-        # Guard NaN từ CE (có thể xảy ra nếu logits bị inf)
-        if not torch.isfinite(l_emotion_student):
-            l_emotion_student = torch.tensor(0.0, device=device, requires_grad=True)
+        l_emotion_student = torch.tensor(0.0, device=device)
+        if logits_emotion_student is not None and self.alpha_student_emotion > 0:
+            # Cast logits sang float32 để tránh overflow khi dùng fp16/bf16
+            logits_emotion_student = logits_emotion_student.float()
+            l_emotion_student = self.ce_loss(logits_emotion_student, emotion_labels)
+            # Guard NaN từ CE (có thể xảy ra nếu logits bị inf)
+            if not torch.isfinite(l_emotion_student):
+                l_emotion_student = torch.tensor(0.0, device=device, requires_grad=True)
+                
         loss_dict["l_emotion_student"] = l_emotion_student.item()
         loss_dict["l_emotion"] = l_emotion_student.item()  # backward compat
 
@@ -211,7 +213,7 @@ class ViSERLoss(nn.Module):
 
         # ── 3. Knowledge Distillation (KL) ───────────────────────────────────
         l_kd = torch.tensor(0.0, device=device)
-        if logits_emotion_teacher is not None and self.alpha_kd > 0:
+        if logits_emotion_student is not None and logits_emotion_teacher is not None and self.alpha_kd > 0:
             l_kd = self._kd_loss(logits_emotion_student, logits_emotion_teacher.float().detach())
             if not torch.isfinite(l_kd):
                 l_kd = torch.tensor(0.0, device=device)
@@ -219,7 +221,7 @@ class ViSERLoss(nn.Module):
 
         # ── 4. Representation Alignment (MSE) ────────────────────────────────
         l_distill = torch.tensor(0.0, device=device)
-        if z_teacher_rep is not None and self.alpha_distill > 0:
+        if z_fused is not None and z_teacher_rep is not None and self.alpha_distill > 0:
             l_distill = self.mse_loss(z_fused, z_teacher_rep.detach())
             if not torch.isfinite(l_distill):
                 l_distill = torch.tensor(0.0, device=device)
@@ -227,7 +229,7 @@ class ViSERLoss(nn.Module):
 
         # ── 5. Hallucination Loss (Cosine Similarity) ────────────────────────
         l_hallu = torch.tensor(0.0, device=device)
-        if z_teacher_rep is not None and self.lambda_hallucination > 0:
+        if z_fused is not None and z_teacher_rep is not None and self.lambda_hallucination > 0:
             l_hallu = self._hallucination_loss(z_fused, z_teacher_rep)
             if not torch.isfinite(l_hallu):
                 l_hallu = torch.tensor(0.0, device=device)

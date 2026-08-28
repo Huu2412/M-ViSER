@@ -68,7 +68,7 @@ def compute_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
     return correct / len(labels)
 
 
-def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
+def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_student=True, run_teacher=True):
     """Evaluate on validation set."""
     model.eval()
     total_loss = 0.0
@@ -95,10 +95,12 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
             outputs = model(
                 input_values=input_values,
                 attention_mask=attention_mask,
-                student_texts=student_texts,
-                teacher_texts=None,
+                teacher_texts=teacher_texts,
                 processor=ctc_tokenizer,
-                training_mode=False,
+                run_student=run_student,
+                run_teacher=run_teacher,
+                teacher_force_no_grad=True,
+                # training_mode=False  (Deprecated)
             )
 
             loss, loss_dict = loss_fn(
@@ -117,7 +119,11 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
             B = input_values.size(0)
             total_loss += loss.item() * B
             
-            emo_preds = outputs["logits_emotion_student"].argmax(-1)
+            if outputs.get("logits_emotion_student") is not None:
+                emo_preds = outputs["logits_emotion_student"].argmax(-1)
+            else:
+                emo_preds = outputs["logits_emotion_teacher"].argmax(-1)
+                
             emotion_correct  += int((emo_preds == emotion_labels).sum())
             
             all_emotion_preds.extend(emo_preds.cpu().tolist())
@@ -142,7 +148,7 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer):
     }
 
 
-def train(config):
+def train(config, args):
     set_seed(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
@@ -179,6 +185,51 @@ def train(config):
     # CRITICAL: Force float32. Wav2Vec2 attention overflows in float16 on GPU
     # causing NaN in hidden_states for long/loud audio sequences.
     model = model.float()
+    
+    # ── Stage Logic ──────────────────────────────────────────────────────────
+    if args.stage == 1:
+        logger.info("=== STAGE 1: TRAINING TEACHER ===")
+        config.alpha_student_emotion = 0.0
+        config.alpha_teacher_emotion = 1.0
+        config.alpha_kd = 0.0
+        config.alpha_distill = 0.0
+        config.lambda_hallucination = 0.0
+        config.output_dir = os.path.join(config.output_dir, "stage1_teacher")
+        os.makedirs(config.output_dir, exist_ok=True)
+        run_student = False
+        run_teacher = True
+        teacher_force_no_grad = False
+    elif args.stage == 2:
+        logger.info("=== STAGE 2: TRAINING STUDENT (DISTILLATION) ===")
+        config.alpha_student_emotion = 1.0
+        config.alpha_teacher_emotion = 0.0
+        # Assume config has these set to >0 defaults, or we force them here
+        config.alpha_kd = getattr(config, "alpha_kd", 0.5) if getattr(config, "alpha_kd", 0.0) > 0 else 0.5
+        config.alpha_distill = getattr(config, "alpha_distill", 0.2) if getattr(config, "alpha_distill", 0.0) > 0 else 0.2
+        config.lambda_hallucination = getattr(config, "lambda_hallucination", 1.0) if getattr(config, "lambda_hallucination", 0.0) > 0 else 1.0
+        config.output_dir = os.path.join(config.output_dir, "stage2_student")
+        os.makedirs(config.output_dir, exist_ok=True)
+        run_student = True
+        run_teacher = True
+        teacher_force_no_grad = True
+        
+        if args.teacher_ckpt:
+            logger.info(f"Loading Teacher Checkpoint from: {args.teacher_ckpt}")
+            ckpt = torch.load(args.teacher_ckpt, map_location=device)
+            if "model_state_dict" in ckpt:
+                model.load_state_dict(ckpt["model_state_dict"], strict=False)
+            else:
+                model.load_state_dict(ckpt, strict=False)
+        else:
+            logger.warning("No --teacher_ckpt provided for Stage 2! Teacher will be random noise.")
+            
+        logger.info("Freezing Teacher components...")
+        model.freeze_teacher()
+    else:
+        logger.info("=== END-TO-END TRAINING ===")
+        run_student = True
+        run_teacher = True
+        teacher_force_no_grad = False
 
     param_counts = model.count_parameters()
     logger.info("Trainable parameters per module:")
@@ -259,7 +310,9 @@ def train(config):
                 student_texts=student_texts,
                 teacher_texts=teacher_texts,
                 processor=ctc_tokenizer,
-                training_mode=True,
+                run_student=run_student,
+                run_teacher=run_teacher,
+                teacher_force_no_grad=teacher_force_no_grad,
             )
 
             # ── Compute loss ──────────────────────────────────────────────
@@ -314,7 +367,10 @@ def train(config):
                 total_truncated += int(batch["is_truncated"].sum().item())
                 
             with torch.no_grad():
-                emo_preds = outputs["logits_emotion_student"].argmax(-1)
+                if outputs.get("logits_emotion_student") is not None:
+                    emo_preds = outputs["logits_emotion_student"].argmax(-1)
+                else:
+                    emo_preds = outputs["logits_emotion_teacher"].argmax(-1)
                 train_emotion_correct += int((emo_preds == emotion_labels).sum())
 
             pbar.set_postfix({
@@ -354,7 +410,7 @@ def train(config):
             print(f"Audio Truncated: {total_truncated}/{train_total} ({truncated_ratio:.2f}%)")
         
         # ── Validation ────────────────────────────────────────────────────
-        val_metrics = evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer)
+        val_metrics = evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_student=run_student, run_teacher=run_teacher)
         
         epoch_time = time.time() - epoch_start_time
         
@@ -483,6 +539,14 @@ if __name__ == "__main__":
         metavar="section.key=value",
         help="Override config values, e.g. --override training.learning_rate=1e-4 loss.alpha_kd=0.8"
     )
+    parser.add_argument(
+        "--stage", type=int, choices=[0, 1, 2], default=0,
+        help="Training stage: 1 (Teacher Only), 2 (Student Distillation), 0 (End-to-End)"
+    )
+    parser.add_argument(
+        "--teacher_ckpt", type=str, default="",
+        help="Path to Stage 1 Teacher checkpoint to load for Stage 2"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -491,4 +555,4 @@ if __name__ == "__main__":
     if args.override:
         config = _apply_overrides(config, args.override)
 
-    train(config)
+    train(config, args)

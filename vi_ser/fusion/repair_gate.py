@@ -24,13 +24,8 @@ class UncertaintyGate(nn.Module):
         self.vocab_size = vocab_size
         self.max_entropy = torch.log(torch.tensor(vocab_size, dtype=torch.float32))
         
-        # Learnable mapping from raw entropy to final alpha
-        self.proj = nn.Sequential(
-            nn.Linear(1, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
-        )
+        # We use raw entropy-based confidence directly instead of a learnable projection
+        # This prevents random initializations from allowing noisy ASR text to leak early in training.
 
     def forward(self, logits_ctc: torch.Tensor, audio_mask: torch.Tensor = None) -> torch.Tensor:
         """
@@ -59,8 +54,8 @@ class UncertaintyGate(nn.Module):
         # Confidence raw = 1 - normalized_entropy
         confidence = 1.0 - norm_entropy # [B]
         
-        # Pass through learnable projection
-        alpha = self.proj(confidence.unsqueeze(1)) # [B, 1]
+        # Use confidence directly as the gate value (already in [0, 1])
+        alpha = confidence.unsqueeze(1) # [B, 1]
         
         return alpha
 
