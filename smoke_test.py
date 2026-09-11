@@ -17,6 +17,7 @@ Dùng: python smoke_test.py
 
 import os
 import sys
+import traceback
 import torch
 import numpy as np
 
@@ -90,6 +91,9 @@ def main():
     # 3. Model
     print("\n[3/6] Initializing model...")
     model = create_model(config, DEVICE)
+    # CRITICAL: Force float32. Wav2Vec2 attention overflows in float16 on GPU
+    # (same as train.py line ~187)
+    model = model.float()
     param_counts = model.count_parameters()
     total_params = param_counts.pop("total")
     for name, count in param_counts.items():
@@ -104,14 +108,20 @@ def main():
     # 5. Forward pass
     print("\n[5/6] Forward pass (training_mode=True)...")
     model.train()
-    outputs = model(
-        input_values=batch["input_values"],
-        attention_mask=batch["attention_mask"].to(DEVICE) if batch["attention_mask"] is not None else None,
-        student_texts=batch["student_texts"],
-        teacher_texts=batch["teacher_texts"],
-        processor=ctc_tokenizer,
-        training_mode=True,
-    )
+    try:
+        outputs = model(
+            input_values=batch["input_values"],
+            attention_mask=batch["attention_mask"].to(DEVICE) if batch["attention_mask"] is not None else None,
+            student_texts=batch["student_texts"],
+            teacher_texts=batch["teacher_texts"],
+            processor=ctc_tokenizer,
+            training_mode=True,
+        )
+    except Exception:
+        print("\n[ERROR] Forward pass FAILED. Full traceback:")
+        traceback.print_exc()
+        sys.exit(1)
+
     print(f"  logits_emotion_student : {outputs['logits_emotion_student'].shape}")
     print(f"  logits_ctc             : {outputs['logits_ctc'].shape}")
     print(f"  z_fused                : {outputs['z_fused'].shape}")
@@ -155,4 +165,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        print("\n[FATAL] Smoke test crashed. Full traceback:")
+        traceback.print_exc()
+        sys.exit(1)
