@@ -192,7 +192,6 @@ def train(config, args):
         config.alpha_student_emotion = 0.0
         config.alpha_teacher_emotion = 1.0
         config.alpha_kd = 0.0
-        config.alpha_distill = 0.0
         config.lambda_hallucination = 0.0
         config.output_dir = os.path.join(config.output_dir, "stage1_teacher")
         os.makedirs(config.output_dir, exist_ok=True)
@@ -205,7 +204,6 @@ def train(config, args):
         config.alpha_teacher_emotion = 0.0
         # Assume config has these set to >0 defaults, or we force them here
         config.alpha_kd = getattr(config, "alpha_kd", 0.5) if getattr(config, "alpha_kd", 0.0) > 0 else 0.5
-        config.alpha_distill = getattr(config, "alpha_distill", 0.2) if getattr(config, "alpha_distill", 0.0) > 0 else 0.2
         config.lambda_hallucination = getattr(config, "lambda_hallucination", 1.0) if getattr(config, "lambda_hallucination", 0.0) > 0 else 1.0
         config.output_dir = os.path.join(config.output_dir, "stage2_student")
         os.makedirs(config.output_dir, exist_ok=True)
@@ -278,7 +276,7 @@ def train(config, args):
         model.train()
         epoch_losses = {
             "l_total": 0.0, "l_emotion_student": 0.0, "l_emotion_teacher": 0.0, "l_emotion": 0.0, "l_ctc": 0.0,
-            "l_kd": 0.0, "l_distill": 0.0,
+            "l_kd": 0.0,
         }
         n_batches = 0
         train_emotion_correct = 0
@@ -497,8 +495,8 @@ def _apply_overrides(config, overrides: list):
         "loss.alpha_student_emotion": ("alpha_student_emotion", float),
         "loss.alpha_teacher_emotion": ("alpha_teacher_emotion", float),
         "loss.alpha_ctc":       ("alpha_ctc",       float),
-        "loss.alpha_kd":        ("alpha_kd",         float),
-        "loss.alpha_distill":   ("alpha_distill",   float),
+        "loss.alpha_kd":        ("alpha_kd",        float),
+        "loss.lambda_hallucination": ("lambda_hallucination", float),
         "loss.kd_temperature":  ("kd_temperature",  float),
         # architecture.*
         "architecture.fusion_dim":            ("fusion_dim",            int),

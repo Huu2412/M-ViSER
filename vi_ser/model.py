@@ -45,7 +45,7 @@ Architecture Overview:
   Knowledge Distillation:
     L_hallucination = 1 - cosine_sim(z_student_rep, z_teacher_rep)
     L_kd            = KL(student_logits || teacher_logits)
-    L_distill       = MSE(z_student_rep, z_teacher_rep)
+    L_hallu         = Cosine(z_student_rep, z_teacher_rep)
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -56,11 +56,11 @@ from typing import Dict, List, Optional, Tuple
 from .config import ViSERConfig
 from .encoders.acoustic_encoder import Wav2Vec2AcousticEncoder
 from .encoders.text_encoder import BERTTextEncoder
-from .fusion.cross_modal import CrossModalEncoders
-from .fusion.audio_guided_gmu import AudioGuidedGatedFusion
+from .fusion.cross_modal import CrossModalEncoders, AuroraCrossModalEncoders
+from .fusion.audio_guided_gmu import AudioGuidedGatedFusion, AuroraGMU
 from .fusion.logit_guided_hallucination import LogitGuidedAttentionPooling, HallucinationMLP
 from .fusion.classifiers import EmotionClassifier, TeacherEmotionHead
-from .fusion.repair_gate import RepairNetwork
+
 
 
 class SERModel(nn.Module):
@@ -98,32 +98,20 @@ class SERModel(nn.Module):
             dropout=config.dropout,
         )
 
-        # ── Student Path: ASR-Text Fusion + Repair Gate ───────────────────────
-        self.student_cross_modal = CrossModalEncoders(
-            audio_input_dim=config.acoustic_hidden_size,
+        # ── Teacher Path: Cross-Modal Fusion (AURORA exact architecture) ─────
+        # AuroraCrossModalEncoders: receives pooled [B, D] inputs, same as AURORA's
+        # CrossModalEncoders — unsqueeze → cross-attn → mean(dim=1)
+        # audio_input_dim = acoustic_hidden_size because z_audio_pooled is mean-pooled
+        # directly from hidden_states [B, T, acoustic_hidden_size]
+        self.teacher_cross_modal = AuroraCrossModalEncoders(
             text_input_dim=config.text_hidden_size,
+            audio_input_dim=config.acoustic_hidden_size,  # mean-pooled from hidden_states
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
             num_heads=config.num_heads,
         )
-        self.student_gmu = AudioGuidedGatedFusion(
-            fusion_dim=config.fusion_dim,
-            dropout=config.dropout,
-        )
-        self.repair_network = RepairNetwork(
-            fusion_dim=config.fusion_dim,
-            vocab_size=config.vocab_size,
-        )
-
-        # ── Teacher Path: Cross-Modal Fusion (AURORA-style) ──────────────────
-        self.teacher_cross_modal = CrossModalEncoders(
-            audio_input_dim=config.acoustic_hidden_size,
-            text_input_dim=config.text_hidden_size,
-            fusion_dim=config.fusion_dim,
-            dropout=config.dropout,
-            num_heads=config.num_heads,
-        )
-        self.teacher_gmu = AudioGuidedGatedFusion(
+        # AuroraGMU: forward(text_feat, audio_feat) — no alpha, exact AURORA logic
+        self.teacher_gmu = AuroraGMU(
             fusion_dim=config.fusion_dim,
             dropout=config.dropout,
         )
@@ -138,43 +126,21 @@ class SERModel(nn.Module):
         audio_mask: torch.Tensor,     # [B, T]
         logits_ctc: torch.Tensor,     # [B, T, V]
         z_audio: torch.Tensor,        # [B, fusion_dim]
-        processor = None,
     ) -> torch.Tensor:
         """
-        Student path: Hybrid AURORA (Hallucination + Repair Gate)
-        """
-        # Step 1: Hallucination (Audio-only ideal text feature approximation)
-        z_asr_aware = self.logit_attn_pool(hidden_states, logits_ctc, audio_mask)
-        z_hallucinated = self.hallucination_mlp(z_asr_aware, z_audio)  # [B, fusion_dim]
+        Student path: Audio-only End-to-End.
+        Uses CTC logits as attention guide, then hallucinates fused representation.
 
-        z_student_rep = z_hallucinated
-        
-        # Step 2: ASR-Text path + Repair Gate + GMU
-        if processor is not None:
-            # Decode CTC to text (Non-differentiable step)
-            pred_ids = torch.argmax(logits_ctc, dim=-1)
-            asr_texts = processor.batch_decode(pred_ids)
-            
-            # Extract BERT features from ASR texts
-            text_out = self.text_encoder(asr_texts, device=hidden_states.device)
-            text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
-            text_mask = text_out["attention_mask"]    # [B, T_t]
-            
-            # Cross-modal alignment
-            z_audio_enc, z_text_enc = self.student_cross_modal(
-                hidden_states, audio_mask, text_hidden, text_mask
-            )
-            
-            # Step 3: Repair Gate
-            z_text_repaired, alpha = self.repair_network(
-                z_text_asr=z_text_enc,
-                z_hallucinated=z_hallucinated,
-                logits_ctc=logits_ctc,
-                audio_mask=audio_mask
-            )
-            
-            # Step 4: Final Fusion (GMU)
-            z_student_rep = self.student_gmu(z_audio_enc, z_text_repaired, alpha)
+        Returns:
+            z_student_rep: [B, fusion_dim]
+        """
+        # Step 1: Logit-Guided Attention Pooling
+        #   CTC logits act as a phonetic highlighter on audio frames
+        z_asr_aware = self.logit_attn_pool(hidden_states, logits_ctc, audio_mask)  # [B, H]
+
+        # Step 2: Hallucination MLP
+        #   Concatenates [z_asr_aware; z_audio] and hallucinates a fused repr
+        z_student_rep = self.hallucination_mlp(z_asr_aware, z_audio)  # [B, fusion_dim]
 
         return z_student_rep
 
@@ -186,27 +152,49 @@ class SERModel(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Teacher path (training only): Audio + Clean GT Text → teacher_rep + logits.
-        Uses AURORA-style Cross-Attention + GMU with full confidence (alpha=1.0).
+        Exact AURORA architecture: _encode(text_cls, z_audio) → gmu(z_clean, z_audio_t).
+
+        Steps (mirrors AURORA's _forward_teacher):
+          1. BERT → CLS token as pooled text embedding [B, text_hidden_size]
+          2. Masked mean-pool audio hidden_states → z_audio_pooled [B, fusion_dim]
+             (z_audio from acoustic_encoder is already at fusion_dim)
+          3. AuroraCrossModalEncoders(text_cls, z_audio_pooled)
+             → z_text_enc [B, fusion_dim], z_audio_enc [B, fusion_dim]
+          4. AuroraGMU(z_text_enc, z_audio_enc) — no alpha (teacher has clean text)
+             → z_teacher_rep [B, fusion_dim]
+          5. TeacherEmotionHead(z_teacher_rep) → logits_emotion_teacher
 
         Returns:
             z_teacher_rep:          [B, fusion_dim]
             logits_emotion_teacher: [B, num_emotion_classes]
         """
-        # Encode clean text with BERT
+        # Step 1: Encode clean text with BERT → extract CLS token [B, text_hidden_size]
         text_out = self.text_encoder(teacher_texts, device=hidden_states.device)
         text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
-        text_mask = text_out["attention_mask"]     # [B, T_t]
+        text_cls = text_hidden[:, 0, :]           # [B, text_hidden_size]  (BERT CLS token)
 
-        # Cross-modal alignment (Audio ↔ Clean Text)
-        z_audio_enc, z_text_enc = self.teacher_cross_modal(
-            hidden_states, audio_mask, text_hidden, text_mask
-        )
+        # Step 2: Mean-pool audio hidden_states with mask → [B, acoustic_hidden_size]
+        # Then use z_audio (already at fusion_dim) from the acoustic encoder output
+        # z_audio is passed via forward() and stored in output dict; here we derive it
+        # from hidden_states using the same masked mean-pool as AURORA's _encode()
+        audio_mask_float = audio_mask.float()  # [B, T]
+        z_audio_pooled = (
+            hidden_states * audio_mask_float.unsqueeze(-1)
+        ).sum(dim=1) / audio_mask_float.sum(dim=1, keepdim=True).clamp(min=1)
+        # z_audio_pooled: [B, acoustic_hidden_size]
+        # Project to fusion_dim to match AuroraCrossModalEncoders audio_input_dim
+        # NOTE: AuroraCrossModalEncoders.audio_encoder handles the Linear projection
 
-        # Gated fusion with full confidence (teacher has clean text)
-        alpha_ones = torch.ones(hidden_states.size(0), 1, device=hidden_states.device)
-        z_teacher_rep = self.teacher_gmu(z_audio_enc, z_text_enc, alpha_ones)
+        # Step 3: Cross-modal alignment (AURORA's _encode equivalent)
+        # AuroraCrossModalEncoders expects pooled [B, D] inputs
+        z_text_enc, z_audio_enc = self.teacher_cross_modal(
+            text_cls, z_audio_pooled
+        )  # both [B, fusion_dim]
 
-        # Teacher emotion classification
+        # Step 4: Audio-Guided GMU — no alpha (AURORA teacher always has full confidence)
+        z_teacher_rep = self.teacher_gmu(z_text_enc, z_audio_enc)  # [B, fusion_dim]
+
+        # Step 5: Teacher emotion classification
         logits_emotion_teacher = self.teacher_emotion_classifier(z_teacher_rep)
 
         return z_teacher_rep, logits_emotion_teacher
@@ -250,13 +238,13 @@ class SERModel(nn.Module):
         z_audio       = acoustic_out["z_audio"]         # [B, fusion_dim]
         logits_ctc    = acoustic_out["logits_ctc"]      # [B, T, V]
 
-        # ── Step 2: Student Path (Hybrid AURORA) ─────────────────────────────
+        # ── Step 2: Student Path (Logit-Guided Hallucination) ────────────────
         z_student_rep = None
         logits_emotion_student = None
         
         if run_student:
             z_student_rep = self._student_forward(
-                hidden_states, audio_mask, logits_ctc, z_audio, processor=processor
+                hidden_states, audio_mask, logits_ctc, z_audio
             )
             # ── Step 3: Emotion Classification (Student) ─────────────────────────
             logits_emotion_student = self.emotion_classifier(z_student_rep)

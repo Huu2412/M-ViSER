@@ -11,7 +11,7 @@ Architecture:
     2. HallucinationMLP:
        Takes the ASR-aware audio features and "hallucinates" (imagines) a representation
        that approximates what the Teacher's Cross-Attention would produce.
-       Trained via Knowledge Distillation loss (MSE/Cosine with teacher_rep).
+       Trained via Knowledge Distillation loss (Cosine with teacher_rep).
 """
 
 import logging

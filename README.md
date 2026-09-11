@@ -10,7 +10,6 @@ M-ViSER is a state-of-the-art Speech Emotion Recognition (SER) system that integ
 - **Cross-Modal Distillation (Teacher Path)**: During training, a Teacher path uses Ground-truth text (via BERT) and Audio to perform **Bidirectional Multi-Head Cross-Attention** and **Audio-Guided Gated Multimodal Fusion (GMU)**. 
 - **Multi-task Learning & Knowledge Distillation**: The Teacher transfers knowledge to the Student via:
   - **KL Divergence (KD Loss)**: Aligning student and teacher emotion logits.
-  - **Representation Distillation (MSE Loss)**: Forcing the student's hallucinated features to match the teacher's fused cross-modal features.
   - **Hallucination Loss (Cosine Similarity)**: Encouraging the student to hallucinate representations highly similar to the teacher's.
   - **CTC Loss**: For auxiliary ASR training.
 - **Standard Benchmarking**: Built-in support for IEMOCAP evaluation (LOSO-5-fold cross-validation on 4 emotion classes: neutral, happy, angry, sad) and imbalanced data handling via Class Weights.

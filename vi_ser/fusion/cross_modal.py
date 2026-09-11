@@ -120,3 +120,85 @@ class CrossModalEncoders(nn.Module):
             z_text_enc = torch.nan_to_num(z_text_enc, nan=0.0, posinf=0.0, neginf=0.0)
 
         return z_audio_enc, z_text_enc
+
+
+class AuroraCrossModalEncoders(nn.Module):
+    """
+    Faithful port of AURORA's CrossModalEncoders.
+
+    Unlike CrossModalEncoders (which handles sequential [B, T, H] audio with masks),
+    this class expects **pooled** inputs [B, D] — the same interface as AURORA's
+    `_encode(text_feat, audio_feat)` method.
+
+    Internally:
+      1. Project text/audio to fusion_dim via Linear → ReLU → LayerNorm → Dropout
+      2. Unsqueeze to [B, 1, fusion_dim] (treat each sample as a 1-token sequence)
+      3. Bidirectional cross-attention: text attends to audio, audio attends to text
+      4. Residual add (shared res_proj) + mean(dim=1) → [B, fusion_dim]
+
+    Returns:
+        z_text_enc:  [B, fusion_dim]
+        z_audio_enc: [B, fusion_dim]
+    """
+
+    def __init__(
+        self,
+        text_input_dim: int,
+        audio_input_dim: int,
+        fusion_dim: int,
+        dropout: float = 0.1,
+        num_heads: int = 4,
+    ):
+        super().__init__()
+
+        self.text_encoder = nn.Sequential(
+            nn.Linear(text_input_dim, fusion_dim),
+            nn.ReLU(),
+            nn.LayerNorm(fusion_dim),
+            nn.Dropout(dropout),
+        )
+
+        self.audio_encoder = nn.Sequential(
+            nn.Linear(audio_input_dim, fusion_dim),
+            nn.ReLU(),
+            nn.LayerNorm(fusion_dim),
+            nn.Dropout(dropout),
+        )
+
+        self.cross_attention_text = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.cross_attention_audio = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+
+        # Shared residual projection (mirrors AURORA's single res_proj)
+        self.res_proj = nn.Linear(fusion_dim, fusion_dim)
+
+    def forward(
+        self,
+        text_feat: torch.Tensor,   # [B, text_input_dim]  — pooled text (e.g. BERT CLS)
+        audio_feat: torch.Tensor,  # [B, audio_input_dim] — pooled audio (e.g. mean-pooled Wav2Vec2)
+    ):
+        # Unsqueeze if already 2-D (AURORA does this explicitly)
+        if text_feat.dim() == 2:
+            text_feat = text_feat.unsqueeze(1)   # [B, 1, text_input_dim]
+        if audio_feat.dim() == 2:
+            audio_feat = audio_feat.unsqueeze(1)  # [B, 1, audio_input_dim]
+
+        text_encoded  = self.text_encoder(text_feat)    # [B, 1, fusion_dim]
+        audio_encoded = self.audio_encoder(audio_feat)  # [B, 1, fusion_dim]
+
+        # Bidirectional cross-attention (AURORA style)
+        text_attn,  _ = self.cross_attention_text(text_encoded,  audio_encoded, audio_encoded)
+        audio_attn, _ = self.cross_attention_audio(audio_encoded, text_encoded, text_encoded)
+
+        # Residual add (shared projection as in AURORA)
+        text_out  = self.res_proj(text_encoded)  + text_attn   # [B, 1, fusion_dim]
+        audio_out = self.res_proj(audio_encoded) + audio_attn  # [B, 1, fusion_dim]
+
+        # Pool back to [B, fusion_dim]  (AURORA: .mean(dim=1))
+        z_text_enc  = text_out.mean(dim=1)   # [B, fusion_dim]
+        z_audio_enc = audio_out.mean(dim=1)  # [B, fusion_dim]
+
+        return z_text_enc, z_audio_enc

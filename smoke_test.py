@@ -115,8 +115,15 @@ def main():
     print(f"  logits_emotion_student : {outputs['logits_emotion_student'].shape}")
     print(f"  logits_ctc             : {outputs['logits_ctc'].shape}")
     print(f"  z_fused                : {outputs['z_fused'].shape}")
-    print(f"  alpha                  : {outputs['alpha'].shape}")
+    if outputs.get('z_student_rep') is not None:
+        print(f"  z_student_rep          : {outputs['z_student_rep'].shape}")
+    if outputs.get('alpha') is not None:
+        print(f"  alpha                  : {outputs['alpha'].shape}")
+    else:
+        print(f"  alpha                  : N/A (AuroraGMU — no alpha in teacher path)")
     print(f"  logits_emotion_teacher : {outputs.get('logits_emotion_teacher', 'N/A (no teacher)')}")
+    if outputs.get('z_teacher_rep') is not None:
+        print(f"  z_teacher_rep          : {outputs['z_teacher_rep'].shape}")
 
     # 6. Loss + backward
     print("\n[6/6] Loss computation + backward pass...")

@@ -50,14 +50,10 @@ model:
   text_model:             "bert-base-uncased"
 
   fusion_dim:             512
-  repair_hidden_dim:      256
   classifier_hidden_dim:  256
   num_emotion_classes:    4
   num_heads:              8
   dropout:                0.3
-  delta_scale:            0.3
-  uncertainty_alpha_min:  0.05
-  uncertainty_alpha_max:  0.95
 
 # ── Freeze Settings ──────────────────────────────────────────
 freeze:
@@ -71,7 +67,6 @@ loss:
   alpha_teacher_emotion: 0.5   # Weight for teacher emotion CE loss
   alpha_ctc:             0.2   # Weight for CTC ASR auxiliary loss
   alpha_kd:              0.5   # Weight for KL knowledge distillation
-  alpha_distill:         0.2   # Weight for MSE representation alignment
   lambda_hallucination:  1.0   # Weight for Cosine Similarity hallucination loss
   kd_temperature:        2.0
   label_smoothing:       0.05

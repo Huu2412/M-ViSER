@@ -25,12 +25,11 @@ class ViSERConfig:
     fusion_dim: int = 512
     num_heads: int = 8
     dropout: float = 0.3
-    repair_hidden_dim: int = 256
     hallucination_hidden_dim: int = 512
-    delta_scale: float = 0.3
-    uncertainty_alpha_min: float = 0.05
-    uncertainty_alpha_max: float = 0.95
-    repair_use_alpha: bool = False  # Ablation flag: if True, z_repaired = z_asr + alpha * delta
+    repair_hidden_dim: int = 256           # AURORA RepairMLP hidden dim
+    delta_scale: float = 0.3              # Scale for bounded repair delta
+    uncertainty_alpha_min: float = 0.05   # UncertaintyGate clamp min
+    uncertainty_alpha_max: float = 0.95   # UncertaintyGate clamp max
 
     # ── Classifier Heads ─────────────────────────────────────────────────────
     num_emotion_classes: int = 4

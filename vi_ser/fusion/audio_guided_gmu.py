@@ -107,3 +107,75 @@ class AudioGuidedGatedFusion(nn.Module):
             z_fused = torch.nan_to_num(z_fused, nan=0.0, posinf=0.0, neginf=0.0)
 
         return z_fused
+
+
+class AuroraGMU(nn.Module):
+    """
+    Faithful port of AURORA's AudioGuidedGatedFusion.
+
+    Key difference from AudioGuidedGatedFusion:
+      - Signature: forward(text_feat, audio_feat) — NO alpha parameter.
+      - Teacher path always has full confidence (clean GT text), so alpha is not needed.
+      - Fusion logic mirrors AURORA exactly:
+          f_t  = text_proj(text_feat)
+          f_a  = audio_proj(audio_feat)
+          f_at = f_a + f_t                          (additive combination)
+          f_at_prime = fusion_ffn(f_at) + f_at       (residual FFN)
+          w    = sigmoid(gate_audio(f_a) + gate_fusion(f_at_prime))
+          fused = (1 - w) * f_a + w * f_at_prime
+          out   = out_proj(fused)
+
+    Used exclusively by the Teacher path.
+    """
+
+    def __init__(
+        self,
+        fusion_dim: int,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+
+        self.audio_proj = nn.Linear(fusion_dim, fusion_dim)
+        self.text_proj  = nn.Linear(fusion_dim, fusion_dim)
+
+        self.fusion_ffn = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(fusion_dim, fusion_dim),
+        )
+
+        self.gate_audio   = nn.Linear(fusion_dim, fusion_dim)
+        self.gate_fusion  = nn.Linear(fusion_dim, fusion_dim)
+
+        self.out_proj = nn.Linear(fusion_dim, fusion_dim)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(
+        self,
+        text_feat: torch.Tensor,   # [B, fusion_dim] — z_clean_text from cross-modal
+        audio_feat: torch.Tensor,  # [B, fusion_dim] — z_audio from cross-modal
+    ) -> torch.Tensor:
+        """
+        Returns:
+            fused: [B, fusion_dim]
+        """
+        f_t = self.text_proj(text_feat)    # [B, fusion_dim]
+        f_a = self.audio_proj(audio_feat)  # [B, fusion_dim]
+
+        # Additive combination (AURORA style)
+        f_at = f_a + f_t                                  # [B, fusion_dim]
+
+        # Residual FFN refinement
+        f_at_prime = self.fusion_ffn(f_at) + f_at         # [B, fusion_dim]
+
+        # Audio-guided gate
+        gate_pre = self.gate_audio(f_a) + self.gate_fusion(f_at_prime)
+        w = self.sigmoid(gate_pre)                        # [B, fusion_dim]
+
+        # Gated fusion: audio baseline + text-enriched contribution
+        fused = (1.0 - w) * f_a + w * f_at_prime         # [B, fusion_dim]
+        fused = self.out_proj(fused)                       # [B, fusion_dim]
+
+        return fused

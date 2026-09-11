@@ -6,7 +6,7 @@ ViSER Combined Loss Function.
 L_total = L_emotion                     (CE — primary emotion classification)
         + alpha_ctc     * L_ctc         (CTC — student ASR auxiliary task)
         + alpha_kd      * L_kd          (KL  — knowledge distillation student||teacher)
-        + alpha_distill * L_distill     (MSE — representation alignment z_fused||z_teacher_rep)
+        + lambda_hallucination * L_hallu (Cosine similarity hallucination loss)
 """
 
 import torch
@@ -23,7 +23,7 @@ class ViSERLoss(nn.Module):
       1. Emotion CE (primary)
       2. CTC ASR loss (student auxiliary — from MTL-SER)
       3. KL knowledge distillation (student emotion logits || teacher emotion logits)
-      4. MSE representation alignment (z_fused || z_teacher_rep)
+      4. Hallucination loss (student representation || teacher representation)
     """
 
     def __init__(self, config):
@@ -32,7 +32,6 @@ class ViSERLoss(nn.Module):
         self.alpha_teacher_emotion = getattr(config, "alpha_teacher_emotion", 0.0)
         self.alpha_ctc      = config.alpha_ctc
         self.alpha_kd       = config.alpha_kd
-        self.alpha_distill  = config.alpha_distill
         self.lambda_hallucination = getattr(config, "lambda_hallucination", 1.0)
         self.temperature    = config.kd_temperature
         self.ctc_zero_infinity = config.ctc_zero_infinity
@@ -48,7 +47,6 @@ class ViSERLoss(nn.Module):
 
 
 
-        self.mse_loss = nn.MSELoss()
         self.kl_loss  = nn.KLDivLoss(reduction="batchmean")
 
     def _ctc_loss(
@@ -219,15 +217,7 @@ class ViSERLoss(nn.Module):
                 l_kd = torch.tensor(0.0, device=device)
         loss_dict["l_kd"] = l_kd.item()
 
-        # ── 4. Representation Alignment (MSE) ────────────────────────────────
-        l_distill = torch.tensor(0.0, device=device)
-        if z_fused is not None and z_teacher_rep is not None and self.alpha_distill > 0:
-            l_distill = self.mse_loss(z_fused, z_teacher_rep.detach())
-            if not torch.isfinite(l_distill):
-                l_distill = torch.tensor(0.0, device=device)
-        loss_dict["l_distill"] = l_distill.item()
-
-        # ── 5. Hallucination Loss (Cosine Similarity) ────────────────────────
+        # ── 4. Hallucination Loss (Cosine Similarity) ────────────────────────
         l_hallu = torch.tensor(0.0, device=device)
         if z_fused is not None and z_teacher_rep is not None and self.lambda_hallucination > 0:
             l_hallu = self._hallucination_loss(z_fused, z_teacher_rep)
@@ -241,7 +231,6 @@ class ViSERLoss(nn.Module):
             + self.alpha_teacher_emotion * l_emotion_teacher
             + self.alpha_ctc      * l_ctc
             + self.alpha_kd       * l_kd
-            + self.alpha_distill  * l_distill
             + self.lambda_hallucination * l_hallu
         )
         loss_dict["l_total"] = l_total.item()

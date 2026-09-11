@@ -83,7 +83,6 @@ def load_config(yaml_path: str) -> ViSERConfig:
         alpha_teacher_emotion = lss.get("alpha_teacher_emotion", 0.5),
         alpha_ctc             = lss.get("alpha_ctc",      0.2),
         alpha_kd              = lss.get("alpha_kd",       0.5),
-        alpha_distill         = lss.get("alpha_distill",  0.0),
         lambda_hallucination  = lss.get("lambda_hallucination", 1.0),
         kd_temperature        = lss.get("kd_temperature", 2.0),
 
