@@ -1,7 +1,7 @@
 torch>=2.6.0
 torchaudio>=2.6.0
 transformers>=4.36.0
-datasets>=2.14.0
+datasets>=2.14.0,<3.0.0
 librosa>=0.10.0
 soundfile>=0.12.1
 numpy>=1.24.0
