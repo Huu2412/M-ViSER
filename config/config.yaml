@@ -65,7 +65,7 @@ freeze:
 loss:
   alpha_student_emotion: 0.5   # Weight for student emotion CE loss
   alpha_teacher_emotion: 0.5   # Weight for teacher emotion CE loss
-  alpha_ctc:             0.2   # Weight for CTC ASR auxiliary loss
+  alpha_ctc:             0.0   # Weight for CTC ASR auxiliary loss
   alpha_kd:              0.5   # Weight for KL knowledge distillation
   lambda_hallucination:  1.0   # Weight for Cosine Similarity hallucination loss
   kd_temperature:        2.0
@@ -76,7 +76,7 @@ training:
   epochs:                     50
   early_stopping_patience:    10     # Stop if metric doesn't improve for 10 epochs
   batch_size:                 8
-  num_workers:                8      # Set 0 to avoid 'Broken pipe' on Windows
+  num_workers:                0      # Set 0 to avoid 'Broken pipe' on Windows
   gradient_accumulation_steps: 4
 
   # --- Learning Rates ---
