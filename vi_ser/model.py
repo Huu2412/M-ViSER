@@ -148,7 +148,9 @@ class SERModel(nn.Module):
         self,
         hidden_states: torch.Tensor,  # [B, T, H]
         audio_mask: torch.Tensor,     # [B, T]
-        teacher_texts: List[str],     # Ground-truth transcripts (clean)
+        teacher_texts: List[str] = None,     # Ground-truth transcripts (clean)
+        teacher_input_ids: torch.Tensor = None,
+        teacher_attention_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Teacher path (training only): Audio + Clean GT Text → teacher_rep + logits.
@@ -169,7 +171,10 @@ class SERModel(nn.Module):
             logits_emotion_teacher: [B, num_emotion_classes]
         """
         # Step 1: Encode clean text with BERT → extract CLS token [B, text_hidden_size]
-        text_out = self.text_encoder(teacher_texts, device=hidden_states.device)
+        if teacher_input_ids is not None:
+            text_out = self.text_encoder.forward_from_token_ids(teacher_input_ids, teacher_attention_mask)
+        else:
+            text_out = self.text_encoder(teacher_texts, device=hidden_states.device)
         text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
         text_cls = text_hidden[:, 0, :]           # [B, text_hidden_size]  (BERT CLS token)
 
@@ -206,6 +211,8 @@ class SERModel(nn.Module):
         attention_mask: torch.Tensor = None,
         # ── Text inputs (Teacher only) ────────────────────────────────────────
         teacher_texts: List[str] = None,      # Ground-truth transcripts (training only)
+        teacher_input_ids: torch.Tensor = None,
+        teacher_attention_mask: torch.Tensor = None,
         # ── Mode ──────────────────────────────────────────────────────────────
         run_student: bool = True,             # Stage 2 or End-to-End
         run_teacher: bool = True,             # Stage 1 or End-to-End
@@ -259,15 +266,15 @@ class SERModel(nn.Module):
         }
 
         # ── Step 4: Teacher Path (training only) ─────────────────────────────
-        if run_teacher and teacher_texts is not None:
+        if run_teacher and (teacher_texts is not None or teacher_input_ids is not None):
             if teacher_force_no_grad:
                 with torch.no_grad():
                     z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
-                        hidden_states, audio_mask, teacher_texts
+                        hidden_states, audio_mask, teacher_texts, teacher_input_ids, teacher_attention_mask
                     )
             else:
                 z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
-                    hidden_states, audio_mask, teacher_texts
+                    hidden_states, audio_mask, teacher_texts, teacher_input_ids, teacher_attention_mask
                 )
             output["z_teacher_rep"]          = z_teacher_rep
             output["logits_emotion_teacher"] = logits_emotion_teacher

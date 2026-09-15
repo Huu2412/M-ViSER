@@ -92,10 +92,22 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
             student_texts   = batch["student_texts"]
             teacher_texts   = batch["teacher_texts"]
 
+            if run_teacher and teacher_texts is not None:
+                tokenizer = model.module.text_encoder.tokenizer if hasattr(model, "module") else model.text_encoder.tokenizer
+                safe_texts = [t if (t and isinstance(t, str) and t.strip()) else "[UNK]" for t in teacher_texts]
+                encoding = tokenizer(safe_texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
+                teacher_input_ids = encoding["input_ids"].to(device)
+                teacher_attention_mask = encoding["attention_mask"].to(device)
+            else:
+                teacher_input_ids = None
+                teacher_attention_mask = None
+
             outputs = model(
                 input_values=input_values,
                 attention_mask=attention_mask,
-                teacher_texts=teacher_texts,
+                teacher_texts=None,
+                teacher_input_ids=teacher_input_ids,
+                teacher_attention_mask=teacher_attention_mask,
                 processor=ctc_tokenizer,
                 run_student=run_student,
                 run_teacher=run_teacher,
@@ -305,12 +317,24 @@ def train(config, args):
             student_texts   = batch["student_texts"]
             teacher_texts   = batch["teacher_texts"]
 
+            if run_teacher and teacher_texts is not None:
+                tokenizer = model.module.text_encoder.tokenizer if hasattr(model, "module") else model.text_encoder.tokenizer
+                safe_texts = [t if (t and isinstance(t, str) and t.strip()) else "[UNK]" for t in teacher_texts]
+                encoding = tokenizer(safe_texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
+                teacher_input_ids = encoding["input_ids"].to(device)
+                teacher_attention_mask = encoding["attention_mask"].to(device)
+            else:
+                teacher_input_ids = None
+                teacher_attention_mask = None
+
             # ── Forward pass ──────────────────────────────────────────────
             outputs = model(
                 input_values=input_values,
                 attention_mask=attention_mask,
-                student_texts=student_texts,
-                teacher_texts=teacher_texts,
+                student_texts=None,
+                teacher_texts=None,
+                teacher_input_ids=teacher_input_ids,
+                teacher_attention_mask=teacher_attention_mask,
                 processor=ctc_tokenizer,
                 run_student=run_student,
                 run_teacher=run_teacher,
