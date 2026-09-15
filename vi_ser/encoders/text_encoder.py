@@ -41,6 +41,7 @@ class BERTTextEncoder(nn.Module):
         self.bert = AutoModel.from_pretrained(
             config.text_model_name,
             cache_dir=config.cache_dir,
+            low_cpu_mem_usage=False,
         )
 
         if config.freeze_text_encoder:

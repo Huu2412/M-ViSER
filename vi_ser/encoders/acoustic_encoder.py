@@ -60,6 +60,7 @@ class Wav2Vec2AcousticEncoder(nn.Module):
             apply_spec_augment=True,  # Will be dynamically disabled for short audio in forward
             use_safetensors=False,
             attn_implementation="eager",  # CRITICAL: Fixes Wav2Vec2 SDPA NaN bug on padded tokens
+            low_cpu_mem_usage=False,
         )
 
         # Freeze CNN feature extractor (same as MTL-SER approach)
