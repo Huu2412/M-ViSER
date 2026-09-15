@@ -113,7 +113,7 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
                 attention_mask=attention_mask,
                 logits_emotion_teacher=outputs.get("logits_emotion_teacher"),
                 z_teacher_rep=outputs.get("z_teacher_rep"),
-                acoustic_encoder=outputs["acoustic_encoder"],
+                acoustic_encoder=model.module.acoustic_encoder if hasattr(model, "module") else model.acoustic_encoder,
             )
 
             B = input_values.size(0)
@@ -233,6 +233,10 @@ def train(config, args):
     logger.info("Trainable parameters per module:")
     for name, count in param_counts.items():
         logger.info(f"  {name}: {count:,}")
+
+    if torch.cuda.device_count() > 1:
+        logger.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
+        model = nn.DataParallel(model)
 
     # ── Loss & Optimizer ─────────────────────────────────────────────────────
     loss_fn = create_loss(config)
@@ -438,7 +442,7 @@ def train(config, args):
         if (current_metric, save_path) in top_k_checkpoints[:max_checkpoints]:
             torch.save({
                 "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_metrics": val_metrics,
                 "config": vars(config),

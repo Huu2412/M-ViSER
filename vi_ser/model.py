@@ -256,7 +256,6 @@ class SERModel(nn.Module):
             "z_fused":                z_student_rep,      # backward compat alias
             "z_audio":                z_audio,
             "hidden_states":          hidden_states,
-            "acoustic_encoder":       self.acoustic_encoder,
         }
 
         # ── Step 4: Teacher Path (training only) ─────────────────────────────
