@@ -352,7 +352,7 @@ def train(config, args):
                 attention_mask=attention_mask,
                 logits_emotion_teacher=outputs.get("logits_emotion_teacher"),
                 z_teacher_rep=outputs.get("z_teacher_rep"),
-                acoustic_encoder=outputs["acoustic_encoder"],
+                acoustic_encoder=model.module.acoustic_encoder if hasattr(model, "module") else model.acoustic_encoder,
             )
 
             # ── Safe Guard: Check for NaN/Inf loss ───────────────────────────
