@@ -67,6 +67,13 @@ class ViSERDataset(Dataset):
             for col in required:
                 assert col in self.df.columns, f"Missing column: {col}"
 
+            # Filter to only allowed pure emotions (neutral, happy, angry, sad)
+            allowed = {"neutral", "happy", "angry", "sad", "neu", "hap", "ang"}
+            orig_len = len(self.df)
+            self.df = self.df[self.df[config.emotion_col].str.lower().str.strip().isin(allowed)].reset_index(drop=True)
+            if len(self.df) < orig_len:
+                logger.info(f"Filtered out {orig_len - len(self.df)} samples from CSV (excluding non-pure emotions). Remaining: {len(self.df)} samples.")
+
     def __len__(self):
         if self.hf_dataset is not None:
             return len(self.hf_dataset)
@@ -124,14 +131,12 @@ class ViSERDataset(Dataset):
             
         return speech
 
-    # Map từ IEMOCAP major_emotion (English full names) sang label map keys
+    # Map từ IEMOCAP major_emotion (English full names) sang label map keys (4 nhãn thuần túy)
     _IEMOCAP_EMOTION_MAP = {
-        "neutral":    "neu",
-        "happy":      "hap",
-        "excited":    "hap",   # excited → happy (gộp như chuẩn IEMOCAP 4-class)
-        "angry":      "ang",
-        "frustrated": "ang",   # frustrated → angry
-        "sad":        "sad",
+        "neutral": "neu",
+        "happy":   "hap",
+        "angry":   "ang",
+        "sad":     "sad",
     }
 
     def __getitem__(self, idx: int) -> Dict:
@@ -332,13 +337,14 @@ def build_dataloaders(config, feature_extractor, ctc_tokenizer, teacher_cache=No
         logger.info(f"Loading HF dataset {config.hf_dataset} ...")
         ds = datasets.load_dataset(config.hf_dataset, split="train")
 
-        # ── Lọc bỏ các nhãn ngoài 4 lớp chuẩn của IEMOCAP (neutral, happy, excited, angry, frustrated, sad) ──
-        allowed_emotions = {"neutral", "happy", "excited", "angry", "frustrated", "sad", "neu", "hap", "ang"}
+        # ── Lọc bỏ các nhãn ngoài 4 lớp thuần túy của IEMOCAP (neutral, happy, angry, sad) ──
+        # Đã loại bỏ hoàn toàn các mẫu 'excited', 'frustrated' và các cảm xúc khác
+        allowed_emotions = {"neutral", "happy", "angry", "sad", "neu", "hap", "ang"}
         emo_col = "emotion" if "emotion" in ds.column_names else "major_emotion" if "major_emotion" in ds.column_names else None
         if emo_col:
             orig_len = len(ds)
             ds = ds.filter(lambda x: str(x[emo_col]).lower().strip() in allowed_emotions)
-            logger.info(f"Filtered out {orig_len - len(ds)} samples with non-standard emotions. Remaining: {len(ds)} samples.")
+            logger.info(f"Filtered out {orig_len - len(ds)} samples with non-standard emotions (retaining only pure neutral, happy, angry, sad). Remaining: {len(ds)} samples.")
 
         # Cast audio column về decode=False (raw bytes) — hỗ trợ cả 'audio' và 'path'
         audio_col = "audio" if "audio" in ds.column_names else "path"
