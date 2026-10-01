@@ -80,6 +80,11 @@ class ViSERConfig:
     cache_dir: Optional[str] = "cache_ser"
     log_dir: str = "logs_ser"
 
+    # ── Cached Features (Offline Extraction) ──────────────────────────────────
+    use_cached_features: bool = False
+    cached_features_dir: str = "cached_features"
+    cache_in_memory: bool = False
+
     # ── Labels ────────────────────────────────────────────────────────────────
     emotion_label_map: dict = field(default_factory=lambda: {
         "neu": 0, "hap": 1, "ang": 2, "sad": 3

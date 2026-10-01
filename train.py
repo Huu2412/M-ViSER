@@ -36,7 +36,7 @@ import time
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vi_ser.data_loader.iemocap import build_dataloaders
+from vi_ser.data_loader import build_dataloaders, build_cached_dataloaders
 from config_loader import load_config
 from vi_ser.factory import (
     create_model,
@@ -81,30 +81,48 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
     start_eval_time = time.time()
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Eval", disable=True):
-            input_values  = batch["input_values"].to(device)
-            attention_mask = batch.get("attention_mask")
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(device)
+            hidden_states = batch.get("hidden_states")
+            audio_mask = batch.get("audio_mask")
+            z_clean_text = batch.get("z_clean_text")
+
+            if hidden_states is not None:
+                hidden_states = hidden_states.to(device)
+                audio_mask = audio_mask.to(device)
+                z_clean_text = z_clean_text.to(device)
+                input_values = None
+                attention_mask = None
+                teacher_input_ids = None
+                teacher_attention_mask = None
+                B = hidden_states.size(0)
+            else:
+                input_values  = batch["input_values"].to(device)
+                attention_mask = batch.get("attention_mask")
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(device)
+                teacher_texts = batch.get("teacher_texts")
+
+                if run_teacher and teacher_texts is not None:
+                    tokenizer = model.module.text_encoder.tokenizer if hasattr(model, "module") else model.text_encoder.tokenizer
+                    safe_texts = [t if (t and isinstance(t, str) and t.strip()) else "[UNK]" for t in teacher_texts]
+                    encoding = tokenizer(safe_texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
+                    teacher_input_ids = encoding["input_ids"].to(device)
+                    teacher_attention_mask = encoding["attention_mask"].to(device)
+                else:
+                    teacher_input_ids = None
+                    teacher_attention_mask = None
+                B = input_values.size(0)
+
             emotion_labels  = batch["emotion_labels"].to(device)
             ctc_labels      = batch.get("ctc_labels")
             if ctc_labels is not None:
                 ctc_labels = ctc_labels.to(device)
-            student_texts   = batch["student_texts"]
-            teacher_texts   = batch["teacher_texts"]
-
-            if run_teacher and teacher_texts is not None:
-                tokenizer = model.module.text_encoder.tokenizer if hasattr(model, "module") else model.text_encoder.tokenizer
-                safe_texts = [t if (t and isinstance(t, str) and t.strip()) else "[UNK]" for t in teacher_texts]
-                encoding = tokenizer(safe_texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
-                teacher_input_ids = encoding["input_ids"].to(device)
-                teacher_attention_mask = encoding["attention_mask"].to(device)
-            else:
-                teacher_input_ids = None
-                teacher_attention_mask = None
 
             outputs = model(
                 input_values=input_values,
                 attention_mask=attention_mask,
+                hidden_states=hidden_states,
+                audio_mask=audio_mask,
+                z_clean_text=z_clean_text,
                 teacher_texts=None,
                 teacher_input_ids=teacher_input_ids,
                 teacher_attention_mask=teacher_attention_mask,
@@ -112,7 +130,6 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
                 run_student=run_student,
                 run_teacher=run_teacher,
                 teacher_force_no_grad=True,
-                # training_mode=False  (Deprecated)
             )
 
             loss, loss_dict = loss_fn(
@@ -122,13 +139,12 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
                 emotion_labels=emotion_labels,
                 ctc_labels=ctc_labels,
                 input_values=input_values,
-                attention_mask=attention_mask,
+                attention_mask=audio_mask if hidden_states is not None else attention_mask,
                 logits_emotion_teacher=outputs.get("logits_emotion_teacher"),
                 z_teacher_rep=outputs.get("z_teacher_rep"),
                 acoustic_encoder=model.module.acoustic_encoder if hasattr(model, "module") else model.acoustic_encoder,
             )
 
-            B = input_values.size(0)
             total_loss += loss.item() * B
             
             if outputs.get("logits_emotion_student") is not None:
@@ -187,9 +203,13 @@ def train(config, args):
     # Teacher text (clean GT transcripts) is read from the dataset CSV text column.
     # No external ASR teacher model needed.
     logger.info("Building dataloaders...")
-    train_loader, val_loader = build_dataloaders(
-        config, feature_extractor, ctc_tokenizer,
-    )
+    if getattr(config, "use_cached_features", False):
+        logger.info(f"Loading CACHED features from '{config.cached_features_dir}' (in_memory={getattr(config, 'cache_in_memory', False)})...")
+        train_loader, val_loader = build_cached_dataloaders(config)
+    else:
+        train_loader, val_loader = build_dataloaders(
+            config, feature_extractor, ctc_tokenizer,
+        )
 
     # ── Initialize Model ─────────────────────────────────────────────────────
     logger.info("Initializing ViSER model...")
@@ -263,7 +283,7 @@ def train(config, args):
     try:
         import thop
         logger.info("Computing FLOPs with thop...")
-        # Create a dummy input (1 second audio, no text since ViSEC is audio-only)
+        # Create a dummy input (1 second audio)
         dummy_audio = torch.randn(1, 16000, device=device)
         dummy_mask = torch.ones(1, 16000, dtype=torch.long, device=device)
         # Using a wrapper to match forward signature for thop
@@ -303,34 +323,47 @@ def train(config, args):
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.num_epochs}", disable=True)
         for step, batch in enumerate(pbar):
-            input_values = batch["input_values"].to(device).float()  # force float32
-            # Noise injection over padding has been removed to avoid train/val distribution mismatch.
-            # NaN issues are already handled by Wav2Vec2 attention mask and SafeLayerNorm guards.
-            
-            attention_mask = batch.get("attention_mask")
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(device)
+            hidden_states = batch.get("hidden_states")
+            audio_mask = batch.get("audio_mask")
+            z_clean_text = batch.get("z_clean_text")
+
+            if hidden_states is not None:
+                hidden_states = hidden_states.to(device)
+                audio_mask = audio_mask.to(device)
+                z_clean_text = z_clean_text.to(device)
+                input_values = None
+                attention_mask = None
+                teacher_input_ids = None
+                teacher_attention_mask = None
+            else:
+                input_values = batch["input_values"].to(device).float()  # force float32
+                attention_mask = batch.get("attention_mask")
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(device)
+                teacher_texts = batch.get("teacher_texts")
+
+                if run_teacher and teacher_texts is not None:
+                    tokenizer = model.module.text_encoder.tokenizer if hasattr(model, "module") else model.text_encoder.tokenizer
+                    safe_texts = [t if (t and isinstance(t, str) and t.strip()) else "[UNK]" for t in teacher_texts]
+                    encoding = tokenizer(safe_texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
+                    teacher_input_ids = encoding["input_ids"].to(device)
+                    teacher_attention_mask = encoding["attention_mask"].to(device)
+                else:
+                    teacher_input_ids = None
+                    teacher_attention_mask = None
+
             emotion_labels  = batch["emotion_labels"].to(device)
             ctc_labels      = batch.get("ctc_labels")
             if ctc_labels is not None:
                 ctc_labels = ctc_labels.to(device)
-            student_texts   = batch["student_texts"]
-            teacher_texts   = batch["teacher_texts"]
-
-            if run_teacher and teacher_texts is not None:
-                tokenizer = model.module.text_encoder.tokenizer if hasattr(model, "module") else model.text_encoder.tokenizer
-                safe_texts = [t if (t and isinstance(t, str) and t.strip()) else "[UNK]" for t in teacher_texts]
-                encoding = tokenizer(safe_texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
-                teacher_input_ids = encoding["input_ids"].to(device)
-                teacher_attention_mask = encoding["attention_mask"].to(device)
-            else:
-                teacher_input_ids = None
-                teacher_attention_mask = None
 
             # ── Forward pass ──────────────────────────────────────────────
             outputs = model(
                 input_values=input_values,
                 attention_mask=attention_mask,
+                hidden_states=hidden_states,
+                audio_mask=audio_mask,
+                z_clean_text=z_clean_text,
                 student_texts=None,
                 teacher_texts=None,
                 teacher_input_ids=teacher_input_ids,
@@ -349,7 +382,7 @@ def train(config, args):
                 emotion_labels=emotion_labels,
                 ctc_labels=ctc_labels,
                 input_values=input_values,
-                attention_mask=attention_mask,
+                attention_mask=audio_mask if hidden_states is not None else attention_mask,
                 logits_emotion_teacher=outputs.get("logits_emotion_teacher"),
                 z_teacher_rep=outputs.get("z_teacher_rep"),
                 acoustic_encoder=model.module.acoustic_encoder if hasattr(model, "module") else model.acoustic_encoder,
@@ -539,6 +572,10 @@ def _apply_overrides(config, overrides: list):
         # dataset.*
         "dataset.current_fold": ("current_fold", int),
         "dataset.hf_dataset":   ("hf_dataset",   str),
+        # cache.*
+        "cache.use_cached_features": ("use_cached_features", lambda v: str(v).lower() in ("true", "1", "yes")),
+        "cache.feature_dir":         ("cached_features_dir", str),
+        "cache.in_memory":           ("cache_in_memory",     lambda v: str(v).lower() in ("true", "1", "yes")),
     }
     for override in overrides:
         if "=" not in override:
@@ -573,6 +610,14 @@ if __name__ == "__main__":
         "--teacher_ckpt", type=str, default="",
         help="Path to Stage 1 Teacher checkpoint to load for Stage 2"
     )
+    parser.add_argument(
+        "--use_cache", action="store_true",
+        help="Train using pre-extracted cached features (.pt)"
+    )
+    parser.add_argument(
+        "--feature_dir", type=str, default=None,
+        help="Directory of cached features (overrides config)"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -580,5 +625,13 @@ if __name__ == "__main__":
 
     if args.override:
         config = _apply_overrides(config, args.override)
+
+    if args.use_cache:
+        config.use_cached_features = True
+        logger.info("CLI flag --use_cache detected: Enabled use_cached_features=True")
+
+    if args.feature_dir:
+        config.cached_features_dir = args.feature_dir
+        logger.info(f"CLI flag --feature_dir detected: cached_features_dir='{args.feature_dir}'")
 
     train(config, args)

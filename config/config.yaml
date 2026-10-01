@@ -61,6 +61,12 @@ freeze:
   acoustic_encoder:   false   # Transformer layers of Wav2Vec2 (finetune)
   text_encoder:       false   # BERT (finetune)
 
+# ── Cached Features (Offline Extraction) ─────────────────────
+cache:
+  use_cached_features: false   # Đổi thành true để đọc trực tiếp đặc trưng đã trích xuất (.pt)
+  feature_dir:         "cached_features"
+  in_memory:           true    # Nạp toàn bộ feature vào RAM để train nhanh nhất (0ms I/O)
+
 # ── Loss Weights ─────────────────────────────────────────────
 loss:
   alpha_student_emotion: 0.5   # Weight for student emotion CE loss

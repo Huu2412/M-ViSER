@@ -22,6 +22,7 @@ def load_config(yaml_path: str) -> ViSERConfig:
     lss = raw.get("loss", {})
     tr  = raw.get("training", {})
     log = raw.get("logging", {})
+    cch = raw.get("cache", {})
 
     # Augmentations
     aug = dat.get("augmentations", {}).get("waveform_augment", {})
@@ -42,6 +43,11 @@ def load_config(yaml_path: str) -> ViSERConfig:
         output_dir = p.get("output_dir", "checkpoints"),
         cache_dir  = p.get("cache_dir",  "cache_ser"),
         log_dir    = p.get("log_dir",    "logs_ser"),
+
+        # cached features
+        use_cached_features = cch.get("use_cached_features", False),
+        cached_features_dir = cch.get("feature_dir", "cached_features"),
+        cache_in_memory     = cch.get("in_memory", False),
 
         # dataset
         hf_dataset        = dat.get("hf_dataset",   None),

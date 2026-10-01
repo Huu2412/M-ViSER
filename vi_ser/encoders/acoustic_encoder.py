@@ -172,32 +172,38 @@ class Wav2Vec2AcousticEncoder(nn.Module):
 
     def forward(
         self,
-        input_values: torch.Tensor,         # [B, T_audio]
+        input_values: torch.Tensor = None,         # [B, T_audio]
         attention_mask: torch.Tensor = None,
         output_hidden_states: bool = False,
+        hidden_states: torch.Tensor = None,        # [B, T, H] (precomputed/cached)
+        audio_mask: torch.Tensor = None,           # [B, T] (precomputed frame mask)
     ):
         """
         Returns:
             hidden_states: [B, T, H]  - frame-level encoder output
             z_audio:       [B, fusion_dim] - mean-pooled + projected
             logits_ctc:    [B, T, vocab_size] - CTC logits
+            audio_mask:    [B, T] - valid frame mask
         """
-        # ── Guard 1: sanitize & normalize input audio ────────────────────────
-        input_values = self._sanitize_audio(input_values)
+        if hidden_states is None:
+            # ── Guard 1: sanitize & normalize input audio ────────────────────────
+            input_values = self._sanitize_audio(input_values)
 
-        # CRITICAL: Prevent zero-variance NaN on short or silent audio segments
-        # (SpecAugment might mask all non-silent frames, causing LayerNorm NaNs)
-        if hasattr(self.encoder, "config") and hasattr(self.encoder.config, "apply_spec_augment"):
-            self.encoder.config.apply_spec_augment = False
+            # CRITICAL: Prevent zero-variance NaN on short or silent audio segments
+            # (SpecAugment might mask all non-silent frames, causing LayerNorm NaNs)
+            if hasattr(self.encoder, "config") and hasattr(self.encoder.config, "apply_spec_augment"):
+                self.encoder.config.apply_spec_augment = False
 
-        outputs = self.encoder(
-            input_values,
-            attention_mask=attention_mask,
-            output_hidden_states=output_hidden_states,
-        )
+            outputs = self.encoder(
+                input_values,
+                attention_mask=attention_mask,
+                output_hidden_states=output_hidden_states,
+            )
 
-        # Last layer hidden states: [B, T, H]
-        hidden_states = outputs[0].float()  # cast to float32
+            # Last layer hidden states: [B, T, H]
+            hidden_states = outputs[0].float()  # cast to float32
+        else:
+            hidden_states = hidden_states.float()
 
         # ── Guard 2: sanitize hidden_states từ Wav2Vec2 ──────────────────────
         hidden_states = _safe_normalize(hidden_states, "Wav2Vec2 hidden_states", is_training=self.training)
@@ -209,7 +215,11 @@ class Wav2Vec2AcousticEncoder(nn.Module):
         logits_ctc = _safe_normalize(logits_ctc, "logits_ctc", is_training=self.training)
 
         # ── Mean pool over time → utterance embedding ────────────────────────
-        if attention_mask is not None:
+        if audio_mask is not None:
+            mask = audio_mask
+            hidden_masked = hidden_states * mask.unsqueeze(-1).float()
+            z_audio = hidden_masked.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1).float()
+        elif attention_mask is not None:
             max_input_len = attention_mask.shape[1]
             max_output_len = hidden_states.shape[1]
             feat_len = self.get_feat_extract_output_lengths(

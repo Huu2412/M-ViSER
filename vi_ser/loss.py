@@ -61,14 +61,21 @@ class ViSERLoss(nn.Module):
         if ctc_labels is None:
             return torch.tensor(0.0, device=logits_ctc.device), 0, 0
 
-        attention_mask = attention_mask if attention_mask is not None else torch.ones(
-            input_values.shape[0], input_values.shape[1], dtype=torch.long, device=input_values.device
-        )
-        max_input_len = input_values.shape[1]
-        max_output_len = logits_ctc.shape[1]
-        input_lengths = acoustic_encoder.get_feat_extract_output_lengths(
-            attention_mask.sum(-1), max_input_len, max_output_len
-        )
+        if input_values is None:
+            # Precomputed/cached features mode: attention_mask is already frame-level [B, T]
+            if attention_mask is not None:
+                input_lengths = attention_mask.sum(-1).long()
+            else:
+                input_lengths = torch.full((logits_ctc.shape[0],), logits_ctc.shape[1], dtype=torch.long, device=logits_ctc.device)
+        else:
+            attention_mask = attention_mask if attention_mask is not None else torch.ones(
+                input_values.shape[0], input_values.shape[1], dtype=torch.long, device=input_values.device
+            )
+            max_input_len = input_values.shape[1]
+            max_output_len = logits_ctc.shape[1]
+            input_lengths = acoustic_encoder.get_feat_extract_output_lengths(
+                attention_mask.sum(-1), max_input_len, max_output_len
+            )
         input_lengths = input_lengths.clamp(min=1)
 
         labels_mask = ctc_labels >= 0
@@ -199,7 +206,7 @@ class ViSERLoss(nn.Module):
         if (
             ctc_labels is not None
             and logits_ctc is not None
-            and acoustic_encoder is not None
+            and (acoustic_encoder is not None or input_values is None)
             and self.alpha_ctc > 0
         ):
             l_ctc, invalid_len, invalid_align = self._ctc_loss(

@@ -60,6 +60,7 @@ from .fusion.cross_modal import CrossModalEncoders, AuroraCrossModalEncoders
 from .fusion.audio_guided_gmu import AudioGuidedGatedFusion, AuroraGMU
 from .fusion.logit_guided_hallucination import LogitGuidedAttentionPooling, HallucinationMLP
 from .fusion.classifiers import EmotionClassifier, TeacherEmotionHead
+from .fusion.aurora_teacher import AuroraTeacher
 
 
 
@@ -99,26 +100,22 @@ class SERModel(nn.Module):
         )
 
         # ── Teacher Path: Cross-Modal Fusion (AURORA exact architecture) ─────
-        # AuroraCrossModalEncoders: receives pooled [B, D] inputs, same as AURORA's
-        # CrossModalEncoders — unsqueeze → cross-attn → mean(dim=1)
-        # audio_input_dim = acoustic_hidden_size because z_audio_pooled is mean-pooled
-        # directly from hidden_states [B, T, acoustic_hidden_size]
-        self.teacher_cross_modal = AuroraCrossModalEncoders(
+        self.teacher = AuroraTeacher(
             text_input_dim=config.text_hidden_size,
-            audio_input_dim=config.acoustic_hidden_size,  # mean-pooled from hidden_states
+            audio_input_dim=config.acoustic_hidden_size,
             fusion_dim=config.fusion_dim,
-            dropout=config.dropout,
-            num_heads=config.num_heads,
+            num_heads=getattr(config, "teacher_num_heads", 4),
+            dropout=getattr(config, "teacher_dropout", 0.3),
+            classifier_layer_dims=getattr(config, "teacher_layer_dims", [512, 128]),
+            num_classes=config.num_emotion_classes,
         )
-        # AuroraGMU: forward(text_feat, audio_feat) — no alpha, exact AURORA logic
-        self.teacher_gmu = AuroraGMU(
-            fusion_dim=config.fusion_dim,
-            dropout=config.dropout,
-        )
+        # Backward-compatible references
+        self.teacher_cross_modal = self.teacher.encoders
+        self.teacher_gmu = self.teacher.gmu
+        self.teacher_emotion_classifier = self.teacher.classifier
 
-        # ── Classification Heads ─────────────────────────────────────────────
+        # ── Student Classification Head ──────────────────────────────────────
         self.emotion_classifier = EmotionClassifier(config)
-        self.teacher_emotion_classifier = TeacherEmotionHead(config)
 
     def _student_forward(
         self,
@@ -151,18 +148,18 @@ class SERModel(nn.Module):
         teacher_texts: List[str] = None,     # Ground-truth transcripts (clean)
         teacher_input_ids: torch.Tensor = None,
         teacher_attention_mask: torch.Tensor = None,
+        z_clean_text: torch.Tensor = None,   # Precomputed text embedding [B, text_hidden_size]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Teacher path (training only): Audio + Clean GT Text → teacher_rep + logits.
         Exact AURORA architecture: _encode(text_cls, z_audio) → gmu(z_clean, z_audio_t).
 
         Steps (mirrors AURORA's _forward_teacher):
-          1. BERT → CLS token as pooled text embedding [B, text_hidden_size]
-          2. Masked mean-pool audio hidden_states → z_audio_pooled [B, fusion_dim]
-             (z_audio from acoustic_encoder is already at fusion_dim)
+          1. BERT → pooled text embedding [B, text_hidden_size] (or use z_clean_text if cached)
+          2. Masked mean-pool audio hidden_states → z_audio_pooled [B, acoustic_hidden_size]
           3. AuroraCrossModalEncoders(text_cls, z_audio_pooled)
              → z_text_enc [B, fusion_dim], z_audio_enc [B, fusion_dim]
-          4. AuroraGMU(z_text_enc, z_audio_enc) — no alpha (teacher has clean text)
+          4. AuroraGMU(z_text_enc, z_audio_enc)
              → z_teacher_rep [B, fusion_dim]
           5. TeacherEmotionHead(z_teacher_rep) → logits_emotion_teacher
 
@@ -170,47 +167,50 @@ class SERModel(nn.Module):
             z_teacher_rep:          [B, fusion_dim]
             logits_emotion_teacher: [B, num_emotion_classes]
         """
-        # Step 1: Encode clean text with BERT → extract CLS token [B, text_hidden_size]
-        if teacher_input_ids is not None:
+        # Step 1: Clean text representation
+        if z_clean_text is not None:
+            z_clean_text = z_clean_text.float()
+        elif teacher_input_ids is not None:
             text_out = self.text_encoder.forward_from_token_ids(teacher_input_ids, teacher_attention_mask)
-        else:
+            text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
+            text_mask = text_out["attention_mask"].float()  # [B, T_t]
+            z_clean_text = (
+                text_hidden * text_mask.unsqueeze(-1)
+            ).sum(dim=1) / text_mask.sum(dim=1, keepdim=True).clamp(min=1)
+        elif teacher_texts is not None:
             text_out = self.text_encoder(teacher_texts, device=hidden_states.device)
-        text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
-        text_cls = text_hidden[:, 0, :]           # [B, text_hidden_size]  (BERT CLS token)
+            text_hidden = text_out["hidden_states"]   # [B, T_t, text_hidden_size]
+            text_mask = text_out["attention_mask"].float()  # [B, T_t]
+            z_clean_text = (
+                text_hidden * text_mask.unsqueeze(-1)
+            ).sum(dim=1) / text_mask.sum(dim=1, keepdim=True).clamp(min=1)
+        else:
+            raise ValueError("Teacher forward requires teacher_texts, teacher_input_ids, or z_clean_text.")
 
-        # Step 2: Mean-pool audio hidden_states with mask → [B, acoustic_hidden_size]
-        # Then use z_audio (already at fusion_dim) from the acoustic encoder output
-        # z_audio is passed via forward() and stored in output dict; here we derive it
-        # from hidden_states using the same masked mean-pool as AURORA's _encode()
+        # Step 2: Masked mean-pool audio hidden_states -> [B, acoustic_hidden_size]
         audio_mask_float = audio_mask.float()  # [B, T]
         z_audio_pooled = (
             hidden_states * audio_mask_float.unsqueeze(-1)
         ).sum(dim=1) / audio_mask_float.sum(dim=1, keepdim=True).clamp(min=1)
-        # z_audio_pooled: [B, acoustic_hidden_size]
-        # Project to fusion_dim to match AuroraCrossModalEncoders audio_input_dim
-        # NOTE: AuroraCrossModalEncoders.audio_encoder handles the Linear projection
 
-        # Step 3: Cross-modal alignment (AURORA's _encode equivalent)
-        # AuroraCrossModalEncoders expects pooled [B, D] inputs
-        z_text_enc, z_audio_enc = self.teacher_cross_modal(
-            text_cls, z_audio_pooled
-        )  # both [B, fusion_dim]
-
-        # Step 4: Audio-Guided GMU — no alpha (AURORA teacher always has full confidence)
-        z_teacher_rep = self.teacher_gmu(z_text_enc, z_audio_enc)  # [B, fusion_dim]
-
-        # Step 5: Teacher emotion classification
-        logits_emotion_teacher = self.teacher_emotion_classifier(z_teacher_rep)
+        # Step 3: Forward through unified AuroraTeacher (CrossModal -> AudioGuidedGMU -> MLPClassifier)
+        teacher_out = self.teacher(text_clean=z_clean_text, audio=z_audio_pooled)
+        z_teacher_rep = teacher_out["teacher_rep"]
+        logits_emotion_teacher = teacher_out["logits_teacher"]
 
         return z_teacher_rep, logits_emotion_teacher
 
     def forward(
         self,
         # ── Audio inputs ──────────────────────────────────────────────────────
-        input_values: torch.Tensor,           # [B, T_audio]
+        input_values: torch.Tensor = None,           # [B, T_audio]
         attention_mask: torch.Tensor = None,
+        # ── Cached / Precomputed inputs ───────────────────────────────────────
+        hidden_states: torch.Tensor = None,          # [B, T, H]
+        audio_mask: torch.Tensor = None,             # [B, T]
+        z_clean_text: torch.Tensor = None,           # [B, text_hidden_size]
         # ── Text inputs (Teacher only) ────────────────────────────────────────
-        teacher_texts: List[str] = None,      # Ground-truth transcripts (training only)
+        teacher_texts: List[str] = None,             # Ground-truth transcripts (training only)
         teacher_input_ids: torch.Tensor = None,
         teacher_attention_mask: torch.Tensor = None,
         # ── Mode ──────────────────────────────────────────────────────────────
@@ -223,22 +223,14 @@ class SERModel(nn.Module):
         training_mode: bool = None,           # Deprecated
     ) -> Dict:
         """
-        Full forward pass.
-
-        Returns dict with:
-            logits_emotion_student: [B, num_emotion_classes]
-            logits_ctc:             [B, T, vocab_size]
-            z_student_rep:          [B, fusion_dim]
-            z_audio:                [B, fusion_dim]
-            hidden_states:          [B, T, H]
-            --- teacher outputs (only if training_mode=True and teacher_texts provided) ---
-            logits_emotion_teacher: [B, num_emotion_classes]
-            z_teacher_rep:          [B, fusion_dim]
+        Full forward pass. Supports both raw audio/text and precomputed/cached features.
         """
         # ── Step 1: Acoustic Encoding (Wav2Vec2) ─────────────────────────────
         acoustic_out = self.acoustic_encoder(
             input_values=input_values,
             attention_mask=attention_mask,
+            hidden_states=hidden_states,
+            audio_mask=audio_mask,
         )
         hidden_states = acoustic_out["hidden_states"]  # [B, T, H]
         audio_mask    = acoustic_out["audio_mask"]      # [B, T]
@@ -266,15 +258,26 @@ class SERModel(nn.Module):
         }
 
         # ── Step 4: Teacher Path (training only) ─────────────────────────────
-        if run_teacher and (teacher_texts is not None or teacher_input_ids is not None):
+        has_teacher_input = (teacher_texts is not None or teacher_input_ids is not None or z_clean_text is not None)
+        if run_teacher and has_teacher_input:
             if teacher_force_no_grad:
                 with torch.no_grad():
                     z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
-                        hidden_states, audio_mask, teacher_texts, teacher_input_ids, teacher_attention_mask
+                        hidden_states=hidden_states,
+                        audio_mask=audio_mask,
+                        teacher_texts=teacher_texts,
+                        teacher_input_ids=teacher_input_ids,
+                        teacher_attention_mask=teacher_attention_mask,
+                        z_clean_text=z_clean_text,
                     )
             else:
                 z_teacher_rep, logits_emotion_teacher = self._teacher_forward(
-                    hidden_states, audio_mask, teacher_texts, teacher_input_ids, teacher_attention_mask
+                    hidden_states=hidden_states,
+                    audio_mask=audio_mask,
+                    teacher_texts=teacher_texts,
+                    teacher_input_ids=teacher_input_ids,
+                    teacher_attention_mask=teacher_attention_mask,
+                    z_clean_text=z_clean_text,
                 )
             output["z_teacher_rep"]          = z_teacher_rep
             output["logits_emotion_teacher"] = logits_emotion_teacher
@@ -283,14 +286,8 @@ class SERModel(nn.Module):
 
     def freeze_teacher(self):
         """Freeze all teacher path components (used in Stage 2)."""
-        if hasattr(self, "teacher_cross_modal"):
-            for param in self.teacher_cross_modal.parameters():
-                param.requires_grad = False
-        if hasattr(self, "teacher_gmu"):
-            for param in self.teacher_gmu.parameters():
-                param.requires_grad = False
-        if hasattr(self, "teacher_emotion_classifier"):
-            for param in self.teacher_emotion_classifier.parameters():
+        if hasattr(self, "teacher"):
+            for param in self.teacher.parameters():
                 param.requires_grad = False
         if hasattr(self, "text_encoder"):
             for param in self.text_encoder.parameters():

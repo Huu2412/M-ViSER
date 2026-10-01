@@ -13,6 +13,7 @@ cache/
 checkpoints/
 logs_ser/
 cv_summary.json
+cached_features/
 
 # Data
 data/
