@@ -93,7 +93,6 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
                 attention_mask = None
                 teacher_input_ids = None
                 teacher_attention_mask = None
-                B = hidden_states.size(0)
             else:
                 input_values  = batch["input_values"].to(device)
                 attention_mask = batch.get("attention_mask")
@@ -110,9 +109,9 @@ def evaluate(model, val_loader, loss_fn, device, config, ctc_tokenizer, run_stud
                 else:
                     teacher_input_ids = None
                     teacher_attention_mask = None
-                B = input_values.size(0)
 
             emotion_labels  = batch["emotion_labels"].to(device)
+            B = emotion_labels.size(0)
             ctc_labels      = batch.get("ctc_labels")
             if ctc_labels is not None:
                 ctc_labels = ctc_labels.to(device)
@@ -419,10 +418,10 @@ def train(config, args):
             total_invalid_align += loss_dict.get("invalid_ctc_alignment", 0)
             n_batches += 1
             
-            B = input_values.size(0)
+            B = emotion_labels.size(0)
             train_total += B
             
-            if "is_truncated" in batch:
+            if "is_truncated" in batch and batch["is_truncated"] is not None:
                 total_truncated += int(batch["is_truncated"].sum().item())
                 
             with torch.no_grad():
